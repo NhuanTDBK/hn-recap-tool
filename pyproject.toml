@@ -1,0 +1,13 @@
+[project]
+name = "hackernews-digest"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "email-validator>=2.3.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.12.3",
+    "ruff>=0.14.2",
+    "trafilatura>=2.0.0",
+]
