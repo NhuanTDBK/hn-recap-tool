@@ -10,6 +10,7 @@ from app.application.use_cases.collection import (
     ExtractContentUseCase,
     CreateDigestUseCase
 )
+from app.application.use_cases.summarization import SummarizePostsUseCase
 from app.infrastructure.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,8 @@ class DataCollectorJob:
         self,
         collect_posts_use_case: CollectPostsUseCase,
         extract_content_use_case: ExtractContentUseCase,
-        create_digest_use_case: CreateDigestUseCase
+        create_digest_use_case: CreateDigestUseCase,
+        summarize_posts_use_case: SummarizePostsUseCase = None
     ):
         """Initialize data collector job.
 
@@ -30,10 +32,12 @@ class DataCollectorJob:
             collect_posts_use_case: Use case for collecting posts
             extract_content_use_case: Use case for extracting content
             create_digest_use_case: Use case for creating digest
+            summarize_posts_use_case: Use case for summarizing posts (optional)
         """
         self.collect_posts = collect_posts_use_case
         self.extract_content = extract_content_use_case
         self.create_digest = create_digest_use_case
+        self.summarize_posts = summarize_posts_use_case
         self.scheduler = AsyncIOScheduler()
 
     async def run_collection(self) -> None:
@@ -42,7 +46,8 @@ class DataCollectorJob:
         This method:
         1. Collects front page posts from HN
         2. Extracts article content for posts with URLs
-        3. Creates a daily digest
+        3. Summarizes content using AI (if enabled)
+        4. Creates a daily digest
         """
         logger.info("Starting HN data collection job")
         date = datetime.utcnow().strftime('%Y-%m-%d')
@@ -67,8 +72,18 @@ class DataCollectorJob:
 
             logger.info(f"Extracted content for {content_extracted} posts")
 
-            # Step 3: Create digest
-            logger.info("Step 3: Creating daily digest")
+            # Step 3: Summarize content (if enabled)
+            if self.summarize_posts and settings.summarization_enabled:
+                logger.info("Step 3: Summarizing post content")
+                try:
+                    summarized_posts = await self.summarize_posts.execute(date=date)
+                    logger.info(f"Summarized {len(summarized_posts)} posts")
+                except Exception as e:
+                    logger.error(f"Failed to summarize posts: {e}", exc_info=True)
+                    logger.info("Continuing without summaries")
+
+            # Step 4: Create digest
+            logger.info("Step 4: Creating daily digest")
             digest = await self.create_digest.execute(date)
             logger.info(f"Created digest with {len(digest.posts)} posts")
 

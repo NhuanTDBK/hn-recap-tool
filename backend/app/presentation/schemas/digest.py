@@ -17,6 +17,7 @@ class PostResponse(BaseModel):
     url: Optional[str] = None
     post_type: str
     content: Optional[str] = None  # Preview only
+    summary: Optional[str] = None  # AI-generated summary
 
     model_config = {
         "json_schema_extra": {
@@ -49,6 +50,7 @@ class PostDetailResponse(BaseModel):
     post_type: str
     content: Optional[str] = None
     raw_content: Optional[str] = None  # Full content
+    summary: Optional[str] = None  # AI-generated summary
     collected_at: datetime
 
     model_config = {

@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, List
 from datetime import datetime
 
-from app.domain.entities import User, Post, Comment, Digest
+from backend.app.domain.entities import User, Post, Comment, Digest
 
 
 # Repository Interfaces (Data Access)
@@ -276,6 +276,78 @@ class ContentExtractor(ABC):
         pass
 
 
+class ContentRepository(ABC):
+    """Interface for content storage and retrieval."""
+
+    @abstractmethod
+    async def save_text_content(self, hn_id: int, content: str) -> None:
+        """Save text content for a post.
+
+        Args:
+            hn_id: HackerNews post ID
+            content: Extracted text content
+        """
+        pass
+
+    @abstractmethod
+    async def save_html_content(self, hn_id: int, html: str) -> None:
+        """Save HTML content for a post.
+
+        Args:
+            hn_id: HackerNews post ID
+            html: Raw HTML content
+        """
+        pass
+
+    @abstractmethod
+    async def get_text_content(self, hn_id: int) -> Optional[str]:
+        """Retrieve text content for a post.
+
+        Args:
+            hn_id: HackerNews post ID
+
+        Returns:
+            Text content if exists, None otherwise
+        """
+        pass
+
+    @abstractmethod
+    async def get_html_content(self, hn_id: int) -> Optional[str]:
+        """Retrieve HTML content for a post.
+
+        Args:
+            hn_id: HackerNews post ID
+
+        Returns:
+            HTML content if exists, None otherwise
+        """
+        pass
+
+    @abstractmethod
+    async def text_content_exists(self, hn_id: int) -> bool:
+        """Check if text content exists for a post.
+
+        Args:
+            hn_id: HackerNews post ID
+
+        Returns:
+            True if text content exists, False otherwise
+        """
+        pass
+
+    @abstractmethod
+    async def html_content_exists(self, hn_id: int) -> bool:
+        """Check if HTML content exists for a post.
+
+        Args:
+            hn_id: HackerNews post ID
+
+        Returns:
+            True if HTML content exists, False otherwise
+        """
+        pass
+
+
 class CacheService(ABC):
     """Interface for caching service."""
 
@@ -368,5 +440,89 @@ class TokenService(ABC):
 
         Returns:
             Decoded token data if valid, None otherwise
+        """
+        pass
+
+
+class SummarizationService(ABC):
+    """Interface for AI-powered content summarization."""
+
+    @abstractmethod
+    async def summarize(self, content: str) -> str:
+        """Generate a summary of the given content.
+
+        Args:
+            content: Text content to summarize
+
+        Returns:
+            Generated summary
+
+        Raises:
+            Exception: If summarization fails
+        """
+        pass
+
+    @abstractmethod
+    async def summarize_batch(self, contents: List[str]) -> List[str]:
+        """Generate summaries for multiple content items.
+
+        Args:
+            contents: List of text contents to summarize
+
+        Returns:
+            List of generated summaries in the same order
+
+        Raises:
+            Exception: If summarization fails
+        """
+        pass
+
+
+class SynthesisSummarizationService(ABC):
+    """Interface for synthesizing summaries from multiple posts."""
+
+    @abstractmethod
+    async def synthesize(self, posts: List[Post]) -> str:
+        """Generate a synthesis summary from multiple posts.
+
+        Args:
+            posts: List of Post entities to synthesize
+
+        Returns:
+            Synthesized summary combining insights from all posts
+
+        Raises:
+            Exception: If synthesis fails
+        """
+        pass
+
+    @abstractmethod
+    async def synthesize_by_topic(self, posts: List[Post], topic: str) -> str:
+        """Generate a topic-focused synthesis from multiple posts.
+
+        Args:
+            posts: List of Post entities to synthesize
+            topic: Topic or theme to focus on
+
+        Returns:
+            Topic-focused synthesized summary
+
+        Raises:
+            Exception: If synthesis fails
+        """
+        pass
+
+    @abstractmethod
+    async def synthesize_from_summaries(self, summaries: List[dict]) -> str:
+        """Generate a synthesis from individual post summaries.
+
+        Args:
+            summaries: List of dicts with 'title', 'summary', and optional 'url'
+
+        Returns:
+            Synthesized summary combining all individual summaries
+
+        Raises:
+            Exception: If synthesis fails
         """
         pass

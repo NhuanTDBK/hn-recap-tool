@@ -9,6 +9,9 @@ from app.presentation.api import auth, digests
 from app.infrastructure.config.settings import settings
 from app.infrastructure.services.redis_cache import RedisCacheService
 from app.infrastructure.jobs.data_collector import DataCollectorJob
+from app.infrastructure.repositories.jsonl_post_repo import JSONLPostRepository
+from app.infrastructure.services.openai_summarization_service import OpenAISummarizationService
+from app.application.use_cases.summarization import SummarizePostsUseCase
 from app.presentation.api.dependencies import (
     get_collect_posts_use_case,
     get_extract_content_use_case,
@@ -41,12 +44,31 @@ async def lifespan(app: FastAPI):
     cache_service = RedisCacheService()
     logger.info("Redis cache service initialized")
 
+    # Initialize summarization use case (if enabled)
+    summarize_posts_use_case = None
+    if settings.summarization_enabled and settings.openai_api_key:
+        try:
+            post_repo = JSONLPostRepository(settings.data_dir)
+            summarization_service = OpenAISummarizationService(
+                api_key=settings.openai_api_key,
+                model=settings.openai_model,
+                max_tokens=settings.openai_max_tokens,
+                temperature=settings.openai_temperature,
+                chunk_size=settings.summarization_chunk_size,
+                max_chunk_tokens=settings.summarization_max_chunk_tokens,
+            )
+            summarize_posts_use_case = SummarizePostsUseCase(post_repo, summarization_service)
+            logger.info("Summarization enabled with OpenAI")
+        except Exception as e:
+            logger.warning(f"Failed to initialize summarization: {e}. Continuing without it.")
+
     # Initialize and start data collector job
     global collector_job
     collector_job = DataCollectorJob(
         collect_posts_use_case=get_collect_posts_use_case(),
         extract_content_use_case=get_extract_content_use_case(),
-        create_digest_use_case=get_create_digest_use_case()
+        create_digest_use_case=get_create_digest_use_case(),
+        summarize_posts_use_case=summarize_posts_use_case
     )
     collector_job.start()
     logger.info("Data collector job started")
