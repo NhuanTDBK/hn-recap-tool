@@ -53,6 +53,7 @@ class Post(BaseModel):
         post_type: Type of post (story, ask, show, job)
         content: Extracted article content (for display)
         raw_content: Full raw content (for processing)
+        summary: AI-generated summary of the content
         collected_at: When we collected this post
         id: Unique identifier (auto-generated if not provided)
     """
@@ -67,6 +68,7 @@ class Post(BaseModel):
     post_type: str = "story"
     content: Optional[str] = None
     raw_content: Optional[str] = None
+    summary: Optional[str] = None
     id: Optional[str] = Field(default_factory=lambda: str(uuid4()))
 
     @field_validator('post_type')

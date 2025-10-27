@@ -5,14 +5,16 @@ from typing import Optional, List
 from datetime import datetime
 import logging
 
-from app.domain.entities import Post
-from app.application.interfaces import PostRepository
-from app.infrastructure.repositories.jsonl_helpers import (
+import aiofiles
+
+from backend.app.domain.entities import Post
+from backend.app.application.interfaces import PostRepository
+from backend.app.infrastructure.repositories.jsonl_helpers import (
     read_jsonl,
     write_jsonl,
     write_jsonl_batch,
     find_by_field,
-    filter_by_field
+    filter_by_field,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,8 @@ class JSONLPostRepository(PostRepository):
         """
         self.data_dir = Path(data_dir)
         self.raw_dir = self.data_dir / "raw"
+        self.content_dir = self.data_dir / "text"
+        self.html_dir = self.data_dir / "html"
         logger.info(f"Initialized JSONLPostRepository with data_dir: {data_dir}")
 
     def _get_file_path(self, date: str) -> str:
@@ -51,7 +55,7 @@ class JSONLPostRepository(PostRepository):
         Returns:
             Date string in YYYY-MM-DD format
         """
-        return post.collected_at.strftime('%Y-%m-%d')
+        return post.collected_at.strftime("%Y-%m-%d")
 
     async def save(self, post: Post) -> Post:
         """Save a post to date-partitioned storage.
@@ -110,7 +114,7 @@ class JSONLPostRepository(PostRepository):
         """
         # Scan all post files in raw directory
         for file_path in sorted(self.raw_dir.glob("*-posts.jsonl"), reverse=True):
-            record = find_by_field(str(file_path), "id", post_id)
+            record = find_by_field(str(file_path), "hn_id", post_id)
             if record:
                 return Post(**record)
 
@@ -134,6 +138,33 @@ class JSONLPostRepository(PostRepository):
                 return Post(**record)
 
         return None
+
+    async def get_by_id(self, article_id: str) -> Optional[Post]:
+        """Find post by article ID (string ID used in content/summaries).
+
+        Note: This requires scanning all date files.
+
+        Args:
+            article_id: Article ID as string (can be hn_id or post id)
+
+        Returns:
+            Post if found, None otherwise
+        """
+        # Try to convert to int for hn_id lookup
+        try:
+            hn_id = int(article_id)
+            return await self.find_by_hn_id(hn_id)
+        except (ValueError, TypeError):
+            # If not a valid int, try find_by_id with string
+            return await self.find_by_id(article_id)
+
+    async def _get_html_content_path(self, post: Post) -> Optional[str]:
+        async with aiofiles.open(self.html_dir / f"{post.hn_id}.html", mode="r") as f:
+            return await f.read()
+
+    async def _get_text_content_path(self, post: Post) -> Optional[str]:
+        async with aiofiles.open(self.content_dir / f"{post.hn_id}.txt", mode="r") as f:
+            return await f.read()
 
     async def find_by_date(self, date: str) -> List[Post]:
         """Find all posts collected on a specific date.

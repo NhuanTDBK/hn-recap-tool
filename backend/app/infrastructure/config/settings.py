@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     # Content Extraction
     content_extraction_timeout: int = 15
 
+    # AI Summarization
+    openai_api_key: Optional[str] = None
+    openai_model: str = "gpt-4o-mini"
+    openai_max_tokens: int = 2000
+    openai_temperature: float = 0.3
+    summarization_enabled: bool = True
+    summarization_chunk_size: int = 8000
+    summarization_max_chunk_tokens: int = 4000
+
     # CORS
     cors_origins: list[str] = ["http://localhost:3000"]
 
