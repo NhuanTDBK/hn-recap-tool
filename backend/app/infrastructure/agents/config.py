@@ -15,7 +15,7 @@ class AgentSettings(BaseSettings):
     )
 
     # OpenAI Configuration
-    openai_api_key: str
+    openai_api_key: Optional[str] = None  # Load from .env, required for agent execution
     openai_model: str = "gpt-4o-mini"
     openai_default_temperature: float = 0.7
     openai_default_max_tokens: int = 500
