@@ -40,15 +40,15 @@ class AgentSummarizePostsUseCase:
         self,
         posts: Optional[List[Post]] = None,
         date: Optional[str] = None,
-    ) -> List[Post]:
-        """Summarize posts using OpenAI Agents SDK and save updated versions.
+    ) -> List[dict]:
+        """Summarize posts using OpenAI Agents SDK and save to summaries table.
 
         Args:
             posts: Optional list of posts to summarize (if not provided, use date)
             date: Optional date to fetch posts (YYYY-MM-DD format)
 
         Returns:
-            List of posts with summaries
+            List of summary dictionaries with post_id, user_id, summary_text, etc.
 
         Raises:
             ValueError: If neither posts nor date is provided
@@ -56,6 +56,7 @@ class AgentSummarizePostsUseCase:
         from backend.app.infrastructure.agents.summarization_agent import (
             summarize_post,
         )
+        from backend.app.infrastructure.database.models import Summary
 
         # Get posts to summarize
         if posts is None and date is None:
@@ -75,43 +76,51 @@ class AgentSummarizePostsUseCase:
             f"Starting agent-based summarization for {len(posts_to_summarize)} posts"
         )
 
-        # Filter posts that have content but no summary
-        posts_needing_summary = [
-            post for post in posts_to_summarize
-            if post.raw_content and not post.summary
-        ]
-
-        if not posts_needing_summary:
-            logger.info("All posts already have summaries")
-            return posts_to_summarize
-
-        logger.info(f"{len(posts_needing_summary)} posts need summarization")
-
         # Generate summaries using agent system
         try:
-            updated_posts = []
+            summaries_created = []
 
-            for post in posts_needing_summary:
-                logger.info(f"Generating summary for post {post.hn_id}")
+            for post in posts_to_summarize:
+                if not post.raw_content:
+                    logger.warning(f"Post {post.hn_id} has no content, skipping")
+                    continue
+
+                logger.info(f"Generating {self.prompt_type} summary for post {post.hn_id}")
 
                 # Use agent to generate summary
-                summary = summarize_post(
+                summary_text = summarize_post(
                     markdown_content=post.raw_content,
                     user_id=self.user_id,
                     prompt_type=self.prompt_type,
                     db_session=self.db_session,
                 )
 
-                # Update and save post
-                post.summary = summary
-                post.summarized_at = None  # Will be set by database
-                updated_post = await self.post_repository.save(post)
-                updated_posts.append(updated_post)
+                # Create summary record in summaries table
+                summary = Summary(
+                    post_id=post.id,
+                    user_id=self.user_id,
+                    prompt_type=self.prompt_type,
+                    summary_text=summary_text,
+                    token_count=None,  # Could track this from agent response
+                    cost_usd=None,  # Could track this from agent response
+                )
 
-                logger.info(f"✓ Saved summary for post {post.hn_id}")
+                if self.db_session:
+                    self.db_session.add(summary)
+                    await self.db_session.commit()
 
-            logger.info(f"Successfully summarized {len(updated_posts)} posts")
-            return updated_posts
+                summaries_created.append({
+                    "post_id": post.id,
+                    "user_id": self.user_id,
+                    "prompt_type": self.prompt_type,
+                    "summary_text": summary_text,
+                    "post_hn_id": post.hn_id,
+                })
+
+                logger.info(f"✓ Saved {self.prompt_type} summary for post {post.hn_id}")
+
+            logger.info(f"Successfully created {len(summaries_created)} summaries")
+            return summaries_created
 
         except Exception as e:
             logger.error(f"Error during agent-based summarization: {e}")
@@ -143,15 +152,15 @@ class AgentSummarizeSinglePostUseCase:
 
     async def execute(
         self, post_id: str, use_structured_output: bool = False
-    ) -> Optional[Post]:
-        """Summarize a single post using OpenAI Agents SDK.
+    ) -> Optional[dict]:
+        """Summarize a single post using OpenAI Agents SDK and save to summaries table.
 
         Args:
             post_id: ID of the post to summarize
             use_structured_output: Return structured output (SummaryOutput Pydantic model)
 
         Returns:
-            Updated post with summary, or None if not found
+            Summary dictionary with post_id, user_id, summary_text, etc., or None if not found
 
         Raises:
             ValueError: If post has no content to summarize
@@ -159,6 +168,7 @@ class AgentSummarizeSinglePostUseCase:
         from backend.app.infrastructure.agents.summarization_agent import (
             summarize_post,
         )
+        from backend.app.infrastructure.database.models import Summary
 
         logger.info(f"Fetching post {post_id} for agent-based summarization")
 
@@ -172,16 +182,11 @@ class AgentSummarizeSinglePostUseCase:
         if not post.raw_content:
             raise ValueError(f"Post {post_id} has no content to summarize")
 
-        # Check if already summarized
-        if post.summary:
-            logger.info(f"Post {post_id} already has a summary")
-            return post
-
         # Generate summary using agent
         try:
-            logger.info(f"Generating agent-based summary for post {post_id}")
+            logger.info(f"Generating {self.prompt_type} summary for post {post_id}")
 
-            summary = summarize_post(
+            summary_text = summarize_post(
                 markdown_content=post.raw_content,
                 user_id=self.user_id,
                 prompt_type=self.prompt_type,
@@ -189,16 +194,32 @@ class AgentSummarizeSinglePostUseCase:
                 use_structured_output=use_structured_output,
             )
 
-            # Update and save post
-            post.summary = (
-                summary
-                if isinstance(summary, str)
-                else summary.summary
-            )
-            updated_post = await self.post_repository.save(post)
+            # Extract text if structured output
+            if not isinstance(summary_text, str):
+                summary_text = summary_text.summary
 
-            logger.info(f"✓ Successfully summarized post {post_id}")
-            return updated_post
+            # Create summary record in summaries table
+            summary = Summary(
+                post_id=post.id,
+                user_id=self.user_id,
+                prompt_type=self.prompt_type,
+                summary_text=summary_text,
+                token_count=None,  # Could track this from agent response
+                cost_usd=None,  # Could track this from agent response
+            )
+
+            if self.db_session:
+                self.db_session.add(summary)
+                await self.db_session.commit()
+
+            logger.info(f"✓ Successfully created {self.prompt_type} summary for post {post_id}")
+
+            return {
+                "post_id": post.id,
+                "user_id": self.user_id,
+                "prompt_type": self.prompt_type,
+                "summary_text": summary_text,
+            }
 
         except Exception as e:
             logger.error(f"Error summarizing post {post_id}: {e}")
