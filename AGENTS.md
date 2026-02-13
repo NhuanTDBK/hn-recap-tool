@@ -432,7 +432,7 @@ hackernews_digest/
 │   └── design/                  # Architecture decision records
 ├── AGENTS.md                    # This file - agent documentation
 ├── README.md                    # Project overview and setup
-├── pyproject.toml               # Python dependencies (uv/pip)
+├── pyproject.toml               # Python dependencies (uv)
 └── uv.lock                      # Lockfile (uv package manager)
 ```
 
@@ -546,7 +546,7 @@ cd backend && ../.venv/bin/python scripts/something.py
 # Python 3.11+ (check version)
 python --version  # Should be >= 3.11
 
-# uv package manager (recommended) or pip
+# uv package manager (required)
 # Install uv: https://github.com/astral-sh/uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
