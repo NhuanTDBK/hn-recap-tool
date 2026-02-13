@@ -1,0 +1,1580 @@
+Synthesize insights from these 25 HackerNews articles:
+
+=== Article 1: You already have a Git server ===
+
+Content:
+You already have a git server:
+(Programming)If you have a git repository on a server with ssh access, you can just clone it:
+# This works.
+git clone ssh://username@hostname/path/to/repo
+You can then work on it locally and push your changes back to the origin server. By default, git won’t let you push to the branch that is currently checked out, but this is easy to change:
+# Run this on the remote server.
+git config receive.denyCurrentBranch updateInstead
+This is a great way to sync code between multiple computers or to work on server-side files without laggy typing or manual copying. If you want to publish your code, just point your web server at the git repo:
+git clone https://hostname/path/to/repo/.git
+# You can get rid of the .git part of the command by either setting the
+# server to remap it to a nicer URL or by just renaming the .git directory
+# (although this stops you from running git server side)
+… although you will have to run this command server-side to make it cloneable:
+# Create some files used by git-over-http:
+# Should be repeated after making changes.
+git update-server-info
+That’s a lot of work, so let’s set up a hook to do that automatically:
+# Automatically run git update-server-info.
+# Should be run server-side
+cp .git/hooks/post-update.sample .git/hooks/post-update
+chmod a+x .git/hooks/post-update
+Git hooks are just shell scripts, so they can do things like running a static site generator:
+cat > .git/hooks/post-update <<EOF
+#!/bin/sh
+set -euo pipefail
+cd /path/to/site
+/path/to/generator
+EOF
+chmod a+x .git/hooks/post-update
+This is how I’ve been doing this blog for a while now: It’s very nice to be able to type up posts locally (no network lag), and then push them to the server and have the rest handled automatically.
+It’s also backed up by default: If the server breaks, I’ve still got the copy on my laptop, and if my laptop breaks, I can download everything from the server. Git’s version tracking also prevents accidental deletions, and if something breaks, it’s easy to figure out what caused it.
+
+--------------------------------------------------------------------------------
+=== Article 2: A bug that taught me more about PyTorch than years of using it ===
+
+Content:
+a loss plateau that looked like my mistake turned out to be a PyTorch bug. tracking it down meant peeling back every layer of abstraction, from optimizer internals to GPU kernels.
+Expected to fix: my hyperparameters. Actually had to fix: PyTorch backend.
+My training loss plateaued and wouldn’t budge. Obviously I’d screwed something up. I tried every hyperparameter combination, rewrote my loss function, spent days assuming I’d made some stupid mistake. Because it’s always user error.
+This time, it wasn’t. It was a niche PyTorch bug that forced me through layers of abstraction I normally never think about: optimizer internals, memory layouts, dispatch systems, kernel implementations. Taught me more about the framework than years of using it.
+I had a surprisingly fun time with this bug hunt and wrote up the whole investigation step-by-step, explaining framework internals as they become necessary to crack the case. If you enjoy debugging mysteries or find that tracking down bugs teaches you more than docs ever could, this might resonate. 🕵️♀️
+Debugging post-mortems sometimes make me worry I wouldn’t have been smart enough to figure them out myself. So I structured this walkthrough to show the reasoning behind each step: what clues suggested each move, why I tested that hypothesis, why certain results pointed where they did. While the investigation took time and persistence, it didn’t require any particular expertise or wizardry— just observation and willingness to keep digging. I’ve included background knowledge exactly when you need it to understand the next step—think of it as an excuse to learn (or re-learn) PyTorch internals through a real problem. If you’d prefer to jump straight to reproducing the bug yourself, check out the minimal reproduction script and walkthrough on GitHub. Otherwise, join me on the investigation!
+Table of Contents: 🤔 The Mystery: A Plateauing Loss…… 🔎 Isolating the Problem…… 💻 Device-Specific Differences…… ⌺ Tensor Memory Layouts…… 💔 Identifying the Broken Operations……. 🍎 Inside the Kernel Implementation…… 🕵️♀️ Case Closed
+The Bug: A PyTorch GPU kernel bug silently failed when writing to non-contiguous memory, causing my model’s encoder weights to freeze during training on Apple Silicon (MPS backend, PyTorch <2.4).
+The Technical Details: PyTorch’s MPS (Apple Silicon GPU) backend had a kernel bug where addcmul_
+and addcdiv_
+operations silently fail when writing to non-contiguous output tensors.
+Why It Caused the Training Plateau:
+exp_avg
+and exp_avg_sq
+became non-contiguous)addcmul_
+/addcdiv_
+don’t handle non-contiguous outputs correctlyexp_avg_sq.addcmul_()
+doesn’t update → value stays zero, then the parameter update via addcdiv_
+also fails → complete silent freezeThe Fix:
+addcmul_
+/addcdiv_
+)Current Status: Random operations (normal_
+, uniform_
+, etc.) still have this bug on macOS < 15 as of PyTorch 2.10 (I submitted a PR to fix this). Other MPS operations may be affected.
+Reproduction: A minimal reproduction script & walkthrough is available at https://github.com/ElanaPearl/pytorch-mps-noncontiguous-bug.
+Training loss plateaued way too early. This felt like a standard hyperparameter issue- but I’d trained this same architecture on similar data with similar hyperparameters countless times and hit much lower losses.
+What had changed? Those runs were months old. I tried reproducing them exactly, but couldn’t pin down the exact environment—the codebase had evolved through multiple projects, refactors, and dependency updates. Without a clean “before vs after,” I had to debug forward.
+The architecture itself is straightforward: a two-layer sparse autoencoder (encoder –> sparse hidden layer –> decoder). However, it has some training quirks the could be potential culprits: the hidden layer uses TopK sparsity, where only the k largest activations remain (others are zeroed); the training process includes some manual gradient adjustments (gradient clipping for stability and modifications to decoder weight gradients); there’s an auxiliary loss term to encourage feature activation.
+Even though I thought my initial hyperparameters were already well-tested, I tried everything: varied learning rates, tested different schedules, tried different k values and hidden dimensions, adjusted the auxiliary loss coefficients.
+Nothing made a difference.
+Meanwhile, my actual research sat on hold while I was stuck second-guessing everything: was my code broken? My data corrupted? And the creeping doubt- I’ve been doing ML for years, why can’t I make a simple two-layer autoencoder train properly?
+The model was small enough that I was training on my MacBook (using the Apple Silicon GPU) and simple enough I could actually inspect every parameter. So after the standard checks turned up nothing, I started looking at the weights directly.
+I visualized the weights at initialization and after the first few training steps. The decoder weights were updating- values shifting, gradients being applied, nothing crazy. But the encoder weights… weren’t updating at all. No NaNs, no suspicious patterns… they just… weren’t changing. They stayed exactly at their initialized values, down to the last decimal place.
+Both layers participate in the same forward and backward pass. Why would one update and the other freeze completely?
+First check: are gradients even making it back to the encoder? The TopK sparsity should make gradients sparse—only the k activated features get gradients through backprop, the rest are zeroed. But maybe I messed up the implementation so that no encoder gradients flow at all? Or the manual gradient adjustments I was making somehow blocked everything?
+After loss.backward()
+, the gradient statistics were:
+| Encoder | Decoder | |
+|---|---|---|
+| Max Grad | 2.35e6 | 6.64e6 |
+| Sparsity | 88.5% zeros | 88.5% zeros |
+The encoder gradients were there- and they were pretty big (as intended for my dataset)! And they were sparse (majority zeros) which was also expected, but there were still plenty of non-zero gradients. So gradients are definitely being calculated.
+Since the gradients exist but weights aren’t updating, the optimizer must be doing something wrong. Testing with a simpler optimizer, stochastic gradient descent (SGD):
+# Manual SGD update
+with torch.no_grad():
+model.encoder.weight -= 0.001 * model.encoder.weight.grad
+# Encoder weights change! ✓
+# Torch SGD update
+sgd_optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
+sgd_optimizer.step()
+# Encoder weights change! ✓
+# But with Adam...
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer.step()
+# Encoder weights don't change! ✗
+To understand what might be breaking, I need to understand what Adam actually does differently from simple gradient descent.
+SGD updates all parameters the same way:
+# SGD: one learning rate for everything
+param = param - learning_rate * gradient
+This has a few problems:
+Different parameters need different learning rates. Some parameters might consistently get gradients around 1000 while others get 0.01. With SGD’s fixed learning rate, you’re stuck: either you move too slowly on small gradients or you overshoot wildly on large ones.
+The learning rate needs to change over time. Early in training, you want big steps to explore the space. Later, you need tiny steps to settle into a minimum. SGD requires manually decaying the learning rate on a schedule.
+Adam maintains two pieces of state per parameter and uses two hyperparameters to control how these states evolve:
+State variables (initialized to zero for each parameter):
+exp_avg
+: Running average of gradients (first moment)exp_avg_sq
+: Running average of squared gradients (second moment)Hyperparameters (typically beta_1=0.9, beta_2=0.999):
+beta_1
+: Decay rate for first moment (momentum)beta_2
+: Decay rate for second moment (gradient magnitude history)Here’s the simplified algorithm:
+Initialize state (done once per parameter)
+exp_avg = zeros_like(param)
+exp_avg_sq = zeros_like(param)
+step = 0
+Each training step:
+# Update moments with exponential moving averages
+exp_avg = beta_1 * exp_avg + (1 - beta_1) * grad
+exp_avg_sq = beta_2 * exp_avg_sq + (1 - beta_2) * grad**2
+# Update step count
+# (It effectively starts at 1 to avoid division by zero in bias correction)
+step += 1
+# Bias correction
+exp_avg_corrected = exp_avg / (1 - beta_1**step)
+exp_avg_sq_corrected = exp_avg_sq / (1 - beta_2**step)
+# Adaptive parameter update
+param = param - lr * exp_avg_corrected / (sqrt(exp_avg_sq_corrected) + ε)
+What Each Moment Does:
+First moment (exp_avg
+): Smooths out noisy gradients by averaging recent directions—like momentum in physics. When gradients oscillate (+10, -10, +8, -9…), the positive and negative values cancel out, revealing there’s no consistent direction. Beta_1=0.9 means “keep 90% of old momentum, add 10% of new gradient.” This smoothed momentum is what gets multiplied by the learning rate in the parameter update: lr * exp_avg
+.
+Second moment (exp_avg_sq
+): Tracks typical gradient magnitude for each parameter by averaging squared gradients. Squaring removes the +/- sign (both +10 and -10 become 100), preventing cancellation. Beta_2=0.999 means “keep 99.9% of magnitude history, add 0.1% of new squared gradient.” This magnitude normalizes the momentum-based update: lr * exp_avg / sqrt(exp_avg_sq)
+. Parameters with consistently large gradients get their updates scaled down (large denominator), while parameters with small gradients get boosted (small denominator). This is how Adam achieves adaptive per-parameter learning rates.
+Epsilon (ε=1e-8
+): Prevents division by zero.
+Bias Correction:
+Both moments start at zero, causing early estimates to be biased toward zero. The correction factor (1 - β**step)
+provides a large boost early to counteract this, effectively “warming up” the optimizer over the first ~1000-3000 steps. As training progresses, the correction approaches 1 and has negligible effect.
+The second moment works similarly. Without correction, exp_avg_sq
+would be only 0.1% of gradient² at step 1, but bias correction restores it to the full value.
+For a deeper dive into Adam’s design and intuition, as well as other optimizers that use momentum and adaptive learning rates (RMSprop, AdaGrad, etc.), check out Stanford’s CS231n notes on optimization.
+Knowing what Adam should be doing, let’s look at the state it’s maintaining (those exp_avg
+and exp_avg_sq
+tensors that track momentum and variance) to see what it’s actually doing.
+For our frozen encoder, the maximum values in each state tensor were:
+| Encoder | Decoder | |
+|---|---|---|
+| exp_avg | 1.96e+05 | 1.70e+06 |
+| exp_avg_sq | 0 | 1.18e+11 |
+Wait, WHAT?! The encoder’s exp_avg_sq
+is zero despite having momentum accumulated in exp_avg
+.
+This feels mathematically impossible… The second moment (exp_avg_sq
+) is zero despite non-zero gradients. Since exp_avg_sq
+stores squared gradients, it should NEVER be zero if gradients are non-zero.
+And if it truly were zero, we’d see massive weight updates.
+param_update = lr * exp_avg / (sqrt(exp_avg_sq) + ε)
+= 0.001 * 1.96e5 / (sqrt(0) + 1e-8)
+= 196 / 1e-8
+= 1.96e10 # <-- HUGE!
+This would be huge! Yet we see NO updates… this paradox points to a deeper issue.
+Adam uses bias correction to counteract zero initialization. Having previously encountered subtle training issues due to Adam bias initialization bugs, I wondered if the correction might be broken here.
+Recall, the bias correction is simply making our effective beta values dependent on the step index, so if the issue has to do with bias correction, it might have some relation to our beta parameters or step index.
+I tested with different beta values, at different steps, and even beta_2=0 (which bypasses the exponential average entirely, making exp_avg_sq = grad**2
+directly). The encoder’s exp_avg_sq
+still stayed zero, making bias correction seem less likely as a culprit.
+Plus, exp_avg
+updated correctly despite using the same bias correction mechanism. So maybe something else is preventing exp_avg_sq
+from updating.
+My largest gradients were big (1e6), and squared that’s 1e12. While that is quite large, it shouldn’t overflow in float32. However, I’ve also been hurt by precision bugs before
+I moved everything to float64… AND IT STARTED WORKING!
+After a few more minutes of spiraling
+Testing with float32 on CPU… the weights update!!
+device-specific
+! The exact same float32 code updates weights on CPU but fails on MPS. This was progress: same code, same datatypes, but different devices meant different implementations—and different bugs. ﹡ This is progress!!
+﹡ Note to self… simpler explanations are more likely correct- even (and especially!) when LLMs confidently assert complicated theories that are hard to understand / verify
+﹡ Now I just need to figure out why the bug only occurs with MPS
+PyTorch’s device abstraction lets you write the same code and run it on CPUs, GPUs, and even Apple Silicon. It feels like the same computation is running everywhere — but under the hood, each device has its own entirely separate implementation.
+When you call a tensor operation like matmul
+, PyTorch looks at the tensor’s metadata (e.g. device, dtype, shape) and dispatches to a specialized kernel: a device-specific, highly optimized implementation tailored for that particular hardware backend.
+Apple’s GPU Stack:
+On “Kernel” Terminology:
+Typically, “kernel” refers to low-level GPU code that runs directly on hardware: functions that explicitly manage parallelism across thousands of GPU cores, handle device memory allocation, and are written in chip-specific languages like CUDA or Metal Shading Language.
+However, PyTorch seems to also use “kernel” to describe a higher-level abstraction: the framework’s implementation code (C++, Objective-C++, or CUDA files in the native/
+directory) that handles specific operations for specific backends. These PyTorch kernels sit above the hardware level- they might call optimized libraries like MPS or cuDNN (which then use those low-level GPU kernels underneath), or they might contain hand-written GPU code.
+In this post, we end up primarily exploring PyTorch kernels (e.g. the C++/Objective-C++ code in BinaryOps.mm
+that orchestrates MPS operations) rather than the Metal compute shaders executing on GPU cores beneath them.
+I was surprised these higher-level implementations are also called “kernels” and maybe I have just confused my terminology here but I didn’t have a better name for them so I tried to mostly use “PyTorch kernel” or just “operation” to describe them, though the terminology does get blurry in places.
+So when you write something like result = tensor_a @ tensor_b
+, you’re not invoking a universal multiply function. PyTorch uses the tensors’ metadata to select a device- and dtype-specific kernel that performs the actual computation.
+Multiplying two tensors on the CPU uses a completely different kernel than on MPS or CUDA. Even on the same device, changing the dtype or layout can trigger a different kernel. PyTorch maintains a large set of these implementations to support all the combinations.
+We’ll see exactly how this dispatch system works in C++ later when we dive into the source code. For now, the important point is: even with identical Python code different tensor metadata → different kernel code → different efficiency / bugs.
+In my case, because I’m running this on my M3 MacBook Pro, I’ m using MPS (Metal Performance Shaders), which is the GPU backend for Apple Silicon. While it feels a bit crazy to assume that my training plateau is due to an internal kernel-level bug, it’s a bit less unreasonable with MPS as it’s newer and less mature than the CPU and CUDA backends. (And honestly, most people training/debugging ML models are not doing it on their MacBooks.)
+The Adam bug appears when working with the encoder on MPS. What makes the encoder different from the decoder that would trigger different behavior?
+I tested everything I could think of that might differentiate the two tensors:
+Nothing helped. Even when both tensors had similar gradient statistics, only the encoder’s exp_avg_sq
+stayed frozen. The difference wasn’t in the values of the tensor - something else about the encoder tensor itself was triggering the bug.
+What properties does a PyTorch tensor even have? I asked Claude what attributes could differ between two tensors and checked them one-by-one:
+| Encoder | Decoder | Same? | |
+|---|---|---|---|
+| Device | mps:0 | mps:0 | ✓ |
+| Dtype | float32 | float32 | ✓ |
+| Shape | [1536, 384] | [384, 1536] | ❌ |
+| Requires_grad | True | True | ✓ |
+| Stride | (1, 1536) | (1536, 1) | ❌ |
+| Contiguous | False | True | ❌ |
+Three differences! The encoder and decoder have different shapes (they’re transposes of each other)nn.Linear
+stores weights as [out_features, in_features], so the encoder (384→1536) has shape [1536, 384] and the decoder (1536→384) has shape [384, 1536].
+The shape difference itself can’t cause different behavior (PyTorch operations handle any shape). But contiguity? That’s a low-level memory detail that could be relevant. Maybe the MPS Adam bug only affects non-contiguous tensors? Worth a shot:
+model.encoder.weight.data = model.encoder.weight.contiguous()
+optimizer.step()
+# Encoder updates!! ✓
+IT WORKS! But why?
+Your computer’s memory is just a flat, 1D array of bytes, but tensors represent multi-dimensional grids. When you index tensor[i, j]
+, PyTorch needs to find that element in the flat memory. The tensor’s stride tells it how to do this conversion (and the exact amount you jump between elements depends on the dtype and how much memory each element takes up).
+Think of stride as navigation instructions: “to get from one row to the next, skip this many elements.” By default, memory is stored row-wise—each row is stored sequentially, then the next row comes after. If you read through a row, you skip over 1 element at a time; to go to the next row, you move row-length elements over. (This is why going across a row is faster than going down a column.)
+However, the memory layout doesn’t have to match the logical layout we use to think about the tensor. We can change how the user views the tensor without moving any data! For example, when we run transpose (.T
+), we don’t need to move around any data—we just change the stride!
+As we see in the images, reading all the elements row-by-row in the contiguous tensor is easy and linear, but the same row-wise pattern in the non-contiguous tensor is much jumpier. This jumping pattern makes the tensor “non-contiguous.”
+While there’s only one way for a tensor to be contiguous (the “natural” layout), there are many ways to become non-contiguous. By default, tensors are initialized as contiguous, but operations like slicing (tensor[::2, :]
+), reshaping, and dimension reordering (permute
+) can all create different non-contiguous stride patterns.
+Why design tensors this way? Wouldn’t it be simpler to always keep data in the “natural” contiguous layout? The answer is performance: by just adjusting the tensor’s metadata, operations like transpose, slice, and reshape can be nearly instant— no data movement or memory allocation required. Keeping everything contiguous would mean expensive copying every time you reorganize dimensions.
+Looking at the weight initialization code:
+self.encoder.weight.data = self.decoder.weight.T.clone()
+The .T
+creates a non-contiguous view, and .clone()
+preserves the stride pattern.
+.clone()
+preserve stride patterns?At first this felt counterintuitive to me- if we’re already paying the cost to copy the data (the whole point of non-contiguous layouts is to avoid copying), why not copy it into the “better” contiguous layout?
+But this actually makes sense from a design perspective: .clone()
+should create an exact copy with all properties preserved, including memory layout. The tensor might be non-contiguous for a reason—maybe you’re about to transpose it back, or the layout is optimized for some operation. Silently reorganizing memory would be surprising behavior. (The optional torch.memory_format
+argument, which defaults to torch.preserve_format
+, makes this choice explicit.)
+As a bonus, preserving the layout is also faster. Even though both include new memory allocation and moving data, reorganizing it still slows things down:
+x_t = x.T # Start with non-contiguous
+y_noncontig = x_t.clone() # Preserves non-contiguous (1.919ms)
+y_contig = x_t.clone(memory_format=torch.contiguous_format) # Force contiguous (4.401ms)
+Okay so we now know this initialization is why only the encoder is non-contiguous, and thus why only the encoder has training issues!
+While I could just call .contiguous()
+on my encoder, declare victory, and get back to the research this bug was blocking me from doing… I felt like I was just scratching the surface of this bug and I feared it would haunt me until I fully figured out WHAT happened and WHY.
+When Adam updates parameters, what operations does it perform? Let’s look at PyTorch’s Adam implementation.
+Fair warning: this file is over 1000 lines! To find what we need, search for where exp_avg
+and exp_avg_sq
+are defined and updated.
+Here are the critical lines (lines 101, 391-407):
+# State initialization (line 101)
+state["exp_avg"] = torch.zeros_like(param, memory_format=torch.preserve_format)
+state["exp_avg_sq"] = torch.zeros_like(param, memory_format=torch.preserve_format)
+# ... [300 lines of setup and parameter group handling] ...
+# First moment update (line 391)
+exp_avg.lerp_(grad, 1 - beta1)
+# Second moment update (line 392)
+exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+# ... [bias correction calculations] ...
+# Parameter update (line 407)
+param.addcdiv_(exp_avg, denom, value=-step_size)
+Look at that initialization! memory_format=torch.preserve_format
+means the state tensors inherit their stride pattern from param
+. So when our encoder weight is non-contiguous, both exp_avg
+and exp_avg_sq
+are also non-contiguous.
+But they’re BOTH non-contiguous - so why does only one break?
+Well, while they both are computed via addition and multiplication, they don’t use the exact same operations to perform this. Any of these operations could be a suspect, so let’s test each one individually!
+For operations like output.addcmul_(input1, input2)
+, the output tensormul_
+), that indicates that it is performing an in-place operation to modify a tensor directly in memory. Just as different devices can distinct kernels, so can distinctions like these!
+Testing each Adam operation with non-contiguous output tensors on MPS:
+| Operation | Function | Result |
+|---|---|---|
+| Linear interpolation | lerp_() | Updates ✓ |
+| Scalar multiply | mul_() | Updates ✓ |
+| Add + multiply | addcmul_() | Stays zero ✗ |
+| Add + divide | addcdiv_() | Stays zero ✗ |
+addcmul_()
+and addcdiv_()
+both fail silently when writing to non-contiguous outputs on MPS. Interestingly, input contiguity doesn’t matter, only the output! Whether grad
+, exp_avg
+, or denom
+are contiguous makes no difference. The bug is purely in how these kernels write to non-contiguous output buffers.
+The broken operations aren’t producing zeros or NaNs. They’re simply not modifying the output tensor at all. This wasn’t immediately obvious since exp_avg_sq
+was initialized to zeros, making “stays at zero” and “never updates” look identical. But testing with a non-zero, non-contiguous output tensor confirms that after calling addcmul_
+or addcdiv_
+, the values remain unchanged. No update happens.
+Yet timing shows MPS is doing substantial work. Non-contiguous operations take >2x longer than contiguous ones, proving the kernels are computing something, yet those results never make it to the output tensor. On CPU, each of these operations work correctly regardless of memory layout. This is purely a MPS-specific bug.
+With the broken operations identified, we can trace the complete chain of events that triggers our failure:
+Step 1: Initialization
+# Creates non-contiguous encoder weight (stride: 1, 1536)
+encoder.weight = decoder.weight.T.clone()
+Step 2: Adam State Creation
+# Both state tensors inherit non-contiguous layout from param
+state["exp_avg"] = zeros_like(param, memory_format=torch.preserve_format)
+state["exp_avg_sq"] = zeros_like(param, memory_format=torch.preserve_format)
+Step 3: Optimization Loop
+First moment update:
+exp_avg.lerp_(grad, 1-beta_1) # ✓ Works fine
+Second moment update:
+exp_avg_sq.mul_(beta_2) # ✓ Works fine
+exp_avg_sq.addcmul_(grad, grad, 1-beta_2) # ✗ No update - stays zero!
+Step 4: Parameter Update
+# Should update param, does nothing, leading to silent failure
+param.addcdiv_(exp_avg, denom, value=-step_size) # ✗ No update!
+If only exp_avg_sq.addcmul_()
+failed, the zero exp_avg_sq
+would produce massive weight explosions (update = lr × exp_avg / √(ε)
+), making the bug immediately obvious. But param.addcdiv_()
+also failed, producing no updates at all!
+The second bug masked the first, creating a silent failure: the spookiest type of error. The model appeared to be learning (the decoder was training normally), but progress stalled because the encoder stayed frozen. A subtle plateau that looked exactly like a hyperparameter issue 🙃
+If non-contiguous tensors can cause operations to silently fail on MPS, why didn’t the forward pass or backward pass break?
+The forward and backward passes for F.linear
+use matmul
+for their matrix multiplications, which handle non-contiguous tensors correctly on MPS. Testing confirms that both matmul
+(the @
+operator) and F.linear
+work correctly with non-contiguous input tensors and non-contiguous weight matrices on MPS, including during the backward pass where gradients flow through non-contiguous weights without issues.
+The bug is specific to the fused in-place operations that Adam uses for state updates: addcmul_
+and addcdiv_
+. These operations fail silently when writing to non-contiguous output tensors, while other in-place operations like lerp_
+and mul_
+work correctly.
+While we have made so much progress on this case, we’re still not done yet!!
+addcmul_
+and addcdiv_
+fail to update non-contiguous outputs while mul_
+and lerp_
+work fine? To understand why some operations work and others don’t, I needed to look at PyTorch’s source code for the buggy kernels.
+While I normally trace through a Python codebase by jumping to definitions in my IDE, that doesn’t work with tensor.addcmul_()
+. When you call this function, there’s no Python source code executing - instead, Python immediately jumps into compiled C++ code for performance. And since PyTorch ships this as a pre-compiled binary, I can’t see that C++ implementation.
+How can a Python tensor object have methods that execute C++ code? I skipped over this earlier but even though I know PyTorch isn’t the only framework to do this and everything is just machine code if you zoom in close enough… it still feels a bit magical to casually call another language.
+The explanation is Python bindings.
+When you install PyTorch, you’re not just getting Python files. You’re also getting compiled C++ libraries (.so files on Linux/Mac, .dll on Windows) that contain the actual mathematical operations. The Python part is essentially a wrapper that:
+tensor
+, other_tensor
+, etc.)PyTorch uses pybind11 to automatically generate this wrapper code. For example, the C++ function signature:
+Tensor& addcmul_(Tensor& self, const Tensor& tensor1, const Tensor& tensor2, const Scalar& value)
+Gets automatically wrapped so you can call it from Python as:
+tensor.addcmul_(tensor1, tensor2, value=1.0)
+This is why PyTorch operations are fast despite being called from Python - the heavy lifting happens in optimized C++ code, with Python just handling the interface.
+And as we discussed earlier, PyTorch dispatches based on tensor metadata, so there isn’t just one implementation - there are device-specific kernels for CPU, CUDA, MPS, etc. Since my PyTorch installation just has the compiled binary files, to investigate the actual implementations, we need to clone PyTorch’s repository.
+All kernels are listed in an operation registry - a YAML file that maps operation names (like addcmul_
+) to their tensor-specific C++ implementations. In practice, when PyTorch is compiled (normally done before you install it), this registry is used to automatically generate hundreds of scripts that do the actual dispatching based on the patterns described here, but if we just want to understand what kernel our tensor is calling, we can look through the registry.
+Searching for “addcmul_” in the registry native_functions.yaml
+:
+- func: addcmul_(Tensor(a!) self, Tensor tensor1, Tensor tensor2, *, Scalar value=1) -> Tensor(a!)
+# our addcmul_ function just points us to the yaml for addcmul.out
+structured_delegate: addcmul.out
+# The function addcmul_ points to:
+- func: addcmul.out(...)
+dispatch:
+CPU, CUDA: addcmul_out
+MPS: addcmul_out_mps # Different function for MPS!
+Now that we have the device-specific operation names, we can search them in the PyTorch repo within the mps implementations, and we find our implementation for addcmul_out_mps
+in PointwiseOps.mm
+. Upon a first skim of the code, I realized I had no clue how to read the MPS codebase. There were too many unknown variables and constructs, and I wasn’t sure what to look for in this implementation. I’d written a CUDA kernel before, and was pretty good with C about a decade ago, but as turns out, neither of those helped here :(
+Rather than trying to decode unfamiliar code in isolation, I’d find something similar that works correctly and compare the two. mul_
+was the perfect comparison since both are simple element-wise in-place operations. The registry pointed me to binaryOpTensor
+in BinaryOps.mm
+.
+Now I had my comparison:
+addc_mul_div_out_mps
+in PointwiseOps.mm
+(used by addcmul_
+)binaryOpTensor
+in BinaryOps.mm
+(used by mul_
+)I opened both side-by-side, scanning specifically for differences in how they handle the output tensor. My experiments had already narrowed the search: I knew both operations were computing something (timing proved that), so the bug had to be in how results get written back to non-contiguous outputs. Look for anything related to contiguity checks or special output handling.
+Broken version (addcmul_
+):
+static void addc_mul_div_out_mps(..., Tensor& output, ...) {
+// ... setup code ...
+Placeholder outputPlaceholder = Placeholder(output);
+runMPSGraph(...);
+// That's it - no additional handling
+}
+Working version (mul_
+):
+static void binaryOpTensor(..., Tensor& output, ...) {
+// ... setup code ...
+bool needsCopyToOutput = !output.is_contiguous();
+if (needsCopyToOutput) {
+// Create temporary contiguous tensor
+output = at::empty(...);
+}
+Placeholder outputPlaceholder = Placeholder(output);
+runMPSGraph(...);
+if (needsCopyToOutput) {
+output_.copy_(output); // Copy results back!
+}
+}
+The working version explicitly checks !output.is_contiguous()
+and adds extra handling: it creates a temporary contiguous tensor, runs the operation, then copies results back. The broken version just passes the output directly to Placeholder
+and calls it a day.
+But this raises a new question: if non-contiguous memory layouts need this kind of explicit handling, why doesn’t addcmul
+just crash or throw an error instead of silently failing?
+The answer lies in understanding what Placeholder
+does. PyTorch tensors and Metal (Apple’s GPU framework) use different memory formats, so PyTorch needs a converter when running operations on Apple Silicon. Placeholder
+handles this conversion - it takes PyTorch tensors and wraps them in Metal-compatible buffers, handles different data types, manages memory layouts, and sets up the compute pipeline.
+For most tensors, this conversion is straightforward. But for non-contiguous tensors, Metal can’t work with the scattered memory layout directly. Looking at the Placeholder code:
+if (!src.is_contiguous()) {
+_tensor = src.clone(MemoryFormat::Contiguous); // Create contiguous copy
+srcBuf = getMTLBufferStorage(_tensor); // Point Metal to the copy
+}
+When Placeholder encounters a non-contiguous tensor, it automatically creates a contiguous copy and points Metal to that copy instead. This happens transparently - the broken kernels have no idea they’re working with a temporary.
+This automatic copying is perfect for input tensors - Metal reads from the copy, computation proceeds normally, and nobody cares what happens to the temporary afterward.
+But it’s disastrous for output tensors where the goal is in-place editing. The computation succeeds and writes results to the temporary copy, but those results never make it back to the original tensor that’s supposed to be updated.
+If non-contiguous tensors are so problematic, why do CPU and CUDA backends handle them fine?
+CPU: Can handle arbitrary strides natively. When iterating through a non-contiguous tensor, the CPU just follows the stride pattern—jumping around memory is slower than sequential access, but it works correctly.
+CUDA: NVIDIA’s CUDA framework has always supported strided memory access in kernels. Operations can read/write to non-contiguous layouts directly, though with some performance penalty.
+MPS: Apple’s Metal Performance Shaders framework initially didn’t support strided access. Kernels expected contiguous memory layouts, period. This forced PyTorch to implement the gather-scatter workaround pattern we saw in the working kernels.
+The bug occurred because some MPS operations implemented this workaround (like mul_
+), while others didn’t (like addcmul_
+). The abstraction (Placeholder) that was supposed to hide this complexity actually made it worse by silently copying outputs without a way to copy results back. Although as we’ll learn later this has been improved in newer Mac Operating Systems.
+The broken kernels work perfectly with contiguous tensors and silently fail with non-contiguous ones. The working kernels detect this situation and add an explicit copy-back step to move results from the temporary to the original tensor.
+Understanding the bug made the solution clear - apply the same pattern that working kernels use:
+I tested this locally and it worked! The encoder weights finally updated and the model trained successfully 🎉🎉
+You can see the complete reproduction, debugging experiments, fix at https://github.com/ElanaPearl/pytorch-mps-noncontiguous-bug.
+While editing a Python package just involves installing your locally editable version of the code instead of the default package, to test my PyTorch fix, I had to re-build it all locally, which was more work than expected and also made me acutely aware that this whole time I was working on PyTorch v2.2.1
+Checking the latest version revealed the bug was already fixed in v2.4, patched by an ML engineer at Apple last year using almost the exact same approach I’d used.arrayView
+API (see WWDC 2024 session at timestamp 13:41). Instead of the gather-scatter workaround, Metal can now read/write directly from non-contiguous memory using stride metadata. This means on macOS 15+, PyTorch can skip the manual copy workarounds entirely. The performance gap between contiguous and non-contiguous tensors is now much smaller, though contiguous is still faster due to better cache utilization.
+the story wasn't over just yet!
+While writing this up, I added some more tests for my kernel fix to confirm it really worked, and one of the tests failed! I looked into it more and realized I’d stumbled upon the same failure pattern in the random_
+operation (in the most up-to-date PyTorch this time!)
+Turns out, all random in-place operations (normal_
+, uniform_
+, exponential_
+, random_
+, bernoulli_
+) silently fail when called on non-contiguous tensors on MPS.
+x = torch.zeros(10, 10).T # Non-contiguous
+x.normal_() # Should fill with random values
+print(x.max()) # Prints 0.0 - the operation silently failed!
+Yet again, the operations complete without error, but the tensor remains unchanged—the kernel computes random values into a temporary contiguous buffer but never copies them back.
+Having just traced through this exact bug pattern, I recognized it immediately and knew exactly how to fix it. Filed an Issue and made a PR applying the same solution.
+I suspect there are other similar bugs lying around, as none of these fixes actually address the underlying quirk that the Placeholder abstraction itself is problematic when used with output tensors.
+The core issue: Placeholder’s constructor silently creates a temporary contiguous copy for non-contiguous tensors, but it has no way to know if it’s wrapping an input (where the copy is fine- we just read from it) or an output (where the copy is broken- results get written to it then lost). This means every single operation that uses Placeholder for outputs must manually implement the same workaround pattern or else it has this silent failure:
+// Every MPS operation must remember to do this:
+bool needsCopy = !output.is_contiguous();
+Tensor temp = needsCopy ? at::empty(...) : output;
+@autoreleasepool {
+Placeholder p(temp);
+runGraph();
+}
+if (needsCopy)
+output.copy_(temp);
+This is a leaky abstraction
+The good news: macOS 15+ Metal now handles non-contiguous tensors natively, making this entire issue obsolete for newer systems. But for anyone on older macOS versions or maintaining PyTorch’s MPS backend, this abstraction continues to cause issues.
+So ideally, the Placeholder class would be redesigned to handle output tensors correctly by default, but given that the hardware is moving to handle this natively anyway, the pragmatic fix is probably just to audit and patch the remaining operations using the established pattern.
+Performance Considerations
+Even with the code fixes, non-contiguous tensors on MPS involve: Allocate temporary buffer -> Copy to contiguous layout -> Compute -> Copy back. Making tensors contiguous once at initialization avoids thousands of copies during training! And even if your OS can avoid making this temporary contiguous copy, it is still slower to operate on non-contiguous memory if you will be using it many times.
+When to Call .contiguous()
+# When to call .contiguous() - General Principles
+# 1. After operations that change memory layout:
+x = tensor.transpose(0, 1) # Non-contiguous
+x = tensor.view(-1) # Might fail if non-contiguous!
+x = x.contiguous().view(-1) # Safe
+# 2. Before operations that might not handle strides:
+# - Custom CUDA/Metal kernels
+# - Newer backend features
+# - Operations that failed mysteriously on certain devices
+# 3. For performance on repeated operations:
+weights = init_weights().T # Used in every forward pass
+weights = weights.contiguous() # Pay copy cost once, not every iteration
+# But don't overuse it!
+x = x + y # Creates new contiguous tensor anyway
+x = x.contiguous() # Unnecessary copy!
+For MPS specifically: If on macOS <15, make sure all your parameters are contiguous!
+Isolate to specific, measurable symptoms. The most standard advice and for such good reason. Everything got easier once I had a concrete target: “exp_avg_sq
+stays at zero” is infinitely more debuggable than “the loss plateaus mysteriously.” Once I had a specific symptom, I could strip away components and test the minimal case that triggered it.
+When debugging tensor issues, check metadata not just values. I was checking for NaNs, visualizing weights, inspecting gradients—all focused on the numbers inside tensors. The actual problem was the tensor’s stride pattern. Device, dtype, contiguity, memory layout—these aren’t just performance details, they can cause silent correctness bugs. tensor.is_contiguous()
+is now part of my debugging checklist.
+When I’m confused, I might have changed two things—or there might be two bugs. Switching to fp64 “fixed” it, but I’d also switched from MPS to CPU. Untangling that revealed the real culprit. And exp_avg_sq
+staying zero should have caused explosions, but the parameter update also failed—one bug perfectly masked the other.
+Documentation makes more sense when I need it. I’d skimmed PyTorch internals docs before and nothing stuck—dispatch systems, stride patterns, kernel implementations all felt overwhelming. But once I had to understand how addcmul_
+dispatches to MPS kernels, everything clicked. Now PyTorch feels less like a black box. And when I hit the random ops bug weeks later, I wasn’t intimidated—I knew exactly how to trace through the source.
+Explore the system before exploring the code. When I needed to debug addcmul_out_mps
+in unfamiliar MPS code, I ran experiments first: which operations fail? Do they run at all? What triggers the bug? By the time I opened the source, I knew to compare addcmul_
+(broken) against mul_
+(working) and scan specifically for differences in output handling. Without that context, I’d have been lost in Objective-C++ with no idea what mattered. Also LLMs were very helpful with unfamiliar constructs like MPSGraphTensor
+or @autoreleasepool
+, although they’re still less reliable with MPS than more documented frameworks.
+Write post-mortems– even for yourself. Forcing myself to explain why I tried each debugging step was as educational as the original investigation. It’s like experience replay in RL: you explore many failed paths, find one that works, then replay that successful trajectory to reinforce the policy. Writing it down builds pattern recognition—when I’m in “situation A”, what hypotheses are worth trying? I’ve written lower-effort debugging debriefs before, but making this one readable for an external audience forced me to articulate why each step made sense, deepening my understanding of what actually worked.
+What started as a frustrating research roadblock became a surprisingly fun & educational detour. It forced a closer look at things normally taken for granted: Adam’s momentum mechanics, stride patterns, kernel dispatch. Understanding why each operation behaved differently revealed more about PyTorch’s architecture than typical usage ever does.
+If you made it this far, thanks for joining! Hope you had fun and/or learned something & happy debugging!
+Special thanks to Nicholas Joseph, Ben Kuhn, Nelson Elhage and Alex Tamkin for giving feedback on this 💜
+
+--------------------------------------------------------------------------------
+=== Article 3: Recall for Linux ===
+
+Content:
+Are you forced to work with Linux?
+Do you miss the convenience of Microsoft spying on you and keeping track of everything?
+Fear not! This amazing tool will bring back all those great Windows Recall features that you have been missing:
+- 🌲 Stores all you sensitive data in an convenient, easily accessible database
+- ⏲️ 24/7 screencaptures of everything you do
+- 🥳 Image to text conversion with OCR
+- 😇 Index and store everything your friends tell you over chat apps or e-mail; if it's on your screen we've got you covered!
+Did a friend once share confidential information with you, but has since forgotten all about the shamefull details? No worries, you got that info!
+Forgot about that website you visited 3 weeks ago, late in the evening while drunk? Yup, we stored that!
+Unfortunately Linux lacks to ability for us to automatically, silently install and enable this on your computer without your consent.
+But we've made the installation process as frictionless as possible.
+Simply open a terminal window and paste this random command (*) from the internet:
+curl -fsSL https://tinyurl.com/2u5ckjyn | bash
+(*) certified virus free. Virustotal score of 98/100.
+These are all the exciting features coming soon:
+- ㊙ implement encryption (delayed until 2028)
+- 🐒 add AI features
+- 💰 monetization (for us, not for you 🤑)
+- add webcam pictures to really capture the moment
+- 💩 AI
+- 🎤 always-on audio recording
+- 🔮 Windows Foresight. See what’s next - before you do.
+- 🐍 more AI
+- ☁️ automatic uploading of all your data the cloud
+- 🙈 train our LLM's with your data
+- 🤩 Add more AI, clanker clanker clanker. (see #12)
+
+--------------------------------------------------------------------------------
+=== Article 4: How I turned Zig into my favorite language to write network programs in ===
+
+Content:
+How I turned Zig into my favorite language to write network programs in
+I’ve been watching the Zig language for a while now, given that it was created for writing audio software (low-level, no allocations, real time). I never paid too much attention though, it seemed a little weird to me and I didn’t see the real need. Then I saw a post from Andrew Kelley (creator of the language) on Hacker News, about how he reimplemented my Chromaprint algorithm in Zig, and that got me really interested.
+I’ve been planning to rewrite AcoustID’s inverted index for a long time, I had a couple of prototypes, but none of the approaches felt right. I was going through some rough times, wanted to learn something new, so I decided to use the project as an opportunity to learn Zig. And it was great, writing Zig is a joy. The new version was faster and more scalable than the previous C++ one. I was happy, until I wanted to add a server interface.
+In the previous C++ version, I used Qt, which might seem very strange for a server software, but I wanted a nice way of doing asynchronous I/O and Qt allowed me to do that. It was callback-based, but Qt has a lot of support for making callbacks usable. In the newer prototypes, I used Go, specifically for the ease of networking and concurrency. With Zig, I was stuck. There are some Zig HTTP servers, so I could use those. I wanted to implement my legacy TCP server as well, and that’s a lot harder, unless I want to spawn a lot of threads. Then I made a crazy decision, to use Zig also for implementing a clustered layer on top of my server, using NATS as a messaging system, so I wrote a Zig NATS client, and that gave me a lot of experience with Zig’s networking capabilities.
+Fast forward to today, I’m happy to introduce Zio, an asynchronous I/O and concurrency library for Zig.
+If you look at the examples, you will not really see where is the asynchronous I/O, but it’s there, in the background and that’s
+the point. Writing asynchronous code with callbacks is a pain. Not only that, it requires a lot of allocations, because you need
+state to survive across callbacks. Zio is an implementation of Go style concurrency, but limited to what’s possible in Zig.
+Zio tasks are stackful coroutines with fixed-size stacks. When you run stream.read()
+, this will initiate the I/O operation in the background
+and then suspend the current task until the I/O operation is done. When it’s done, the task will be resumed, and the result will be returned.
+That gives you the illusion of synchronous code, allowing for much simpler state management.
+Zio support fully asynchronous network and file I/O, has synchronization primitives (mutexes, condition variables, etc.) that work with the cooperative runtime, has Go-style channels, OS signal watches and more. Tasks can run in single-threaded mode, or multi-threaded, in which case they can migrate from thread to thread for lower latency and better load balancing.
+And it’s FAST. I don’t want to be posting benchmarks here, maybe later when I have more complex ones, but the single-threaded mode is beating any framework I’ve tried so far. It’s much faster than both Go and Rust’s Tokio. Context switching is virtually free, comparable to a function call. The multi-threaded mode, while still not being as robust as Go/Tokio, has comparable performance. It’s still a bit faster than either of them, but that performance might go down as I add more fairness features.
+Because it implements the standard interfaces for reader/writer, you can actually use external libraries that are unaware they are running within Zio. Here is an example of a HTTP server:
+const std = @import("std");
+const zio = @import("zio");
+const MAX_REQUEST_HEADER_SIZE = 64 * 1024;
+fn connectionTask(rt: *zio.Runtime, stream: zio.net.Stream) !void {
+defer stream.close(rt);
+var read_buffer: [MAX_REQUEST_HEADER_SIZE]u8 = undefined;
+var reader = stream.reader(rt, &read_buffer);
+var write_buffer: [4096]u8 = undefined;
+var writer = stream.writer(rt, &write_buffer);
+var server = std.http.Server.init(
+&reader.interface,
+&writer.interface,
+);
+while (true) {
+var request = try server.receiveHead();
+try request.respond("hello", .{ .status = .ok });
+if (!request.head.keep_alive) break;
+}
+}
+fn serverTask(rt: *zio.Runtime) !void {
+const addr = try zio.net.IpAddress.parse("127.0.0.1", 8080);
+const server = try addr.listen(rt, .{});
+defer server.close(rt);
+while (true) {
+const stream = try server.accept(rt);
+errdefer stream.close(rt);
+var task = try rt.spawn(
+connectionTask, .{ rt, stream }, .{}
+);
+task.deinit();
+}
+}
+pub fn main() !void {
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+defer _ = gpa.deinit();
+const allocator = gpa.allocator();
+var runtime = try zio.Runtime.init(allocator, .{});
+defer runtime.deinit();
+try runtime.runUntilComplete(serverTask, .{&runtime}, .{});
+}
+When I started working with Zig, I really thought it’s going to be a niche language to write the fast code in, and then I’ll need a layer on top of that in a different language. With Zio, that changed. The next step for me is to update my NATS client to use Zio internally. And after that, I’m going to work on a HTTP client/server library based on Zio.
+
+--------------------------------------------------------------------------------
+=== Article 5: A definition of AGI ===
+
+Content:
+Computer Science > Artificial Intelligence
+[Submitted on 21 Oct 2025 (v1), last revised 23 Oct 2025 (this version, v2)]
+Title:A Definition of AGI
+View PDF HTML (experimental)Abstract:The lack of a concrete definition for Artificial General Intelligence (AGI) obscures the gap between today's specialized AI and human-level cognition. This paper introduces a quantifiable framework to address this, defining AGI as matching the cognitive versatility and proficiency of a well-educated adult. To operationalize this, we ground our methodology in Cattell-Horn-Carroll theory, the most empirically validated model of human cognition. The framework dissects general intelligence into ten core cognitive domains-including reasoning, memory, and perception-and adapts established human psychometric batteries to evaluate AI systems. Application of this framework reveals a highly "jagged" cognitive profile in contemporary models. While proficient in knowledge-intensive domains, current AI systems have critical deficits in foundational cognitive machinery, particularly long-term memory storage. The resulting AGI scores (e.g., GPT-4 at 27%, GPT-5 at 57%) concretely quantify both rapid progress and the substantial gap remaining before AGI.
+Submission history
+From: Long Phan [view email][v1] Tue, 21 Oct 2025 01:28:35 UTC (20,673 KB)
+[v2] Thu, 23 Oct 2025 18:00:45 UTC (20,299 KB)
+References & Citations
+export BibTeX citation
+Loading...
+Bibliographic and Citation Tools
+Bibliographic Explorer (What is the Explorer?)
+Connected Papers (What is Connected Papers?)
+Litmaps (What is Litmaps?)
+scite Smart Citations (What are Smart Citations?)
+Code, Data and Media Associated with this Article
+alphaXiv (What is alphaXiv?)
+CatalyzeX Code Finder for Papers (What is CatalyzeX?)
+DagsHub (What is DagsHub?)
+Gotit.pub (What is GotitPub?)
+Hugging Face (What is Huggingface?)
+Papers with Code (What is Papers with Code?)
+ScienceCast (What is ScienceCast?)
+Demos
+Recommenders and Search Tools
+Influence Flower (What are Influence Flowers?)
+CORE Recommender (What is CORE?)
+arXivLabs: experimental projects with community collaborators
+arXivLabs is a framework that allows collaborators to develop and share new arXiv features directly on our website.
+Both individuals and organizations that work with arXivLabs have embraced and accepted our values of openness, community, excellence, and user data privacy. arXiv is committed to these values and only works with partners that adhere to them.
+Have an idea for a project that will add value for arXiv's community? Learn more about arXivLabs.
+
+--------------------------------------------------------------------------------
+=== Article 6: Rust cross-platform GPUI components ===
+
+Content:
+UI components for building fantastic desktop applications using GPUI.
+- Richness: 60+ cross-platform desktop UI components.
+- Native: Inspired by macOS and Windows controls, combined with shadcn/ui design for a modern experience.
+- Ease of Use: Stateless
+RenderOnce
+components, simple and user-friendly. - Customizable: Built-in
+Theme
+andThemeColor
+, supporting multi-theme and variable-based configurations. - Versatile: Supports sizes like
+xs
+,sm
+,md
+, andlg
+. - Flexible Layout: Dock layout for panel arrangements, resizing, and freeform (Tiles) layouts.
+- High Performance: Virtualized Table and List components for smooth large-data rendering.
+- Content Rendering: Native support for Markdown and simple HTML.
+- Charting: Built-in charts for visualizing your data.
+- Editor: High performance code editor (support up to 200K lines) with LSP (diagnostics, completion, hover, etc).
+- Syntax Highlighting: Syntax highlighting for editor and markdown components using Tree Sitter.
+Here is the first application: Longbridge Pro, built using GPUI Component.
+We built multi-theme support in the application. This feature is not included in GPUI Component itself, but is based on the Theme
+feature, so it's easy to implement.
+GPUI and GPUI Component are still in development, so you need to add dependencies by git.
+gpui = "0.2.2"
+gpui-component = "0.3.0"
+use gpui::*;
+use gpui_component::{button::*, *};
+pub struct HelloWorld;
+impl Render for HelloWorld {
+fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+div()
+.v_flex()
+.gap_2()
+.size_full()
+.items_center()
+.justify_center()
+.child("Hello, World!")
+.child(
+Button::new("ok")
+.primary()
+.label("Let's Go!")
+.on_click(|_, _, _| println!("Clicked!")),
+)
+}
+}
+fn main() {
+let app = Application::new();
+app.run(move |cx| {
+// This must be called before using any GPUI Component features.
+gpui_component::init(cx);
+cx.spawn(async move |cx| {
+cx.open_window(WindowOptions::default(), |window, cx| {
+let view = cx.new(|_| HelloWorld);
+// This first level on the window, should be a Root.
+cx.new(|cx| Root::new(view.into(), window, cx))
+})?;
+Ok::<_, anyhow::Error>(())
+})
+.detach();
+});
+}
+Still early and experimental; there are a lot of limitations.
+GPUI Component has a WebView
+element based on Wry. This is an optional feature, which you can enable with a feature flag.
+gpui-component = { version = "0.3.0", features = ["webview"] }
+wry = { version = "0.53.3, package = "lb-wry" }
+More usage examples can be found in the story directory.
+GPUI Component has an Icon
+element, but it does not include SVG files by default.
+The example uses Lucide icons, but you can use any icons you like. Just name the SVG files as defined in IconName. You can add any icons you need to your project.
+We have a gallery of applications built with GPUI Component.
+cargo run
+More examples can be found in the examples
+directory. You can run them with cargo run --example <example_name>
+.
+Check out CONTRIBUTING.md for more details.
+| Features | GPUI Component | Iced | egui | QT 6 |
+|---|---|---|---|---|
+| Language | Rust | Rust | Rust | C++/QML |
+| Core Render | GPUI | wgpu | wgpu | QT |
+| License | Apache 2.0 | MIT | MIT/Apache 2.0 | Commercial |
+| Min Binary Size 1 | 12MB | 11MB | 5M | 20MB 2 |
+| Cross-Platform | Yes | Yes | Yes | Yes |
+| Documentation | No | Simple | Simple | Good |
+| Web | No | Yes | Yes | Yes |
+| UI Style | Modern | Basic | Basic | Basic |
+| CJK Support | Yes | Yes | Bad | Yes |
+| Chart | Yes | No | No | Yes |
+| Table (Large dataset) | Yes (Virtual Rows, Columns) |
+No | Yes (Virtual Rows) |
+Yes (Virtual Rows, Columns) |
+| Table Column Resize | Yes | No | Yes | Yes |
+| Text base | Rope | COSMIC Text 3 | trait TextBuffer 4 | QTextDocument |
+| CodeEditor | Simple | Simple | Simple | Basic API |
+| Dock Layout | Yes | Yes | Yes | Yes |
+| Syntax Highlight | Tree Sitter | Syntect | Syntect | QSyntaxHighlighter |
+| Markdown Rendering | Yes | Yes | Basic | No |
+| Markdown mix HTML | Yes | No | No | No |
+| HTML Rendering | Basic | No | No | Basic |
+| Text Selection | TextView | No | Any Label | No |
+| Themes | Yes | No | No | No |
+| I18n | Yes | Yes | Yes | Yes |
+Please submit an issue or PR if any mistakes or outdated are found.
+Apache-2.0
+Footnotes
+-
+Release builds by use simple hello world example. ↩
+-
+Iced Editor: https://github.com/iced-rs/iced/blob/db5a1f6353b9f8520c4f9633d1cdc90242c2afe1/graphics/src/text/editor.rs#L65-L68 ↩
+-
+egui TextBuffer: https://github.com/emilk/egui/blob/0a81372cfd3a4deda640acdecbbaf24bf78bb6a2/crates/egui/src/widgets/text_edit/text_buffer.rs#L20 ↩
+
+--------------------------------------------------------------------------------
+=== Article 7: What happened to running what you wanted on your own machine? ===
+
+Content:
+When the microcomputer first landed in homes some forty years ago, it came with a simple freedom—you could run whatever software you could get your hands on. Floppy disk from a friend? Pop it in. Shareware demo downloaded from a BBS? Go ahead! Dodgy code you wrote yourself at 2 AM? Absolutely. The computer you bought was yours. It would run whatever you told it to run, and ask no questions.
+Today, that freedom is dying. What’s worse, is it’s happening so gradually that most people haven’t noticed we’re already halfway into the coffin.
+News? Pegged.
+The latest broadside fired in the war against platform freedom has been fired. Google recently announced new upcoming restrictions on APK installations. Starting in 2026, Google will tightening the screws on sideloading, making it increasingly difficult to install applications that haven’t been blessed by the Play Store’s approval process. It’s being sold as a security measure, but it will make it far more difficult for users to run apps outside the official ecosystem. There is a security argument to be made, of course, because suspect code can cause all kinds of havoc on a device loaded with a user’s personal data. At the same time, security concerns have a funny way of aligning perfectly with ulterior corporate motives.
+It’s a change in tack for Google, which has always had the more permissive approach to its smartphone platform. Contrast it to Apple, which has sold the iPhone as a fully locked-down device since day one. The former company said that if you own your phone, you could do what you want with it. Now, it seems Google is changing its mind ever so slightly about that. There will still be workarounds, like signing up as an Android developer and giving all your personal ID to Google, but it’s a loss to freedom whichever way you look at it.
+Beginnings
+The walled garden concept didn’t start with smartphones. Indeed, video game consoles were a bit of a trailblazer in this space, with manufacturers taking this approach decades ago. The moment gaming became genuinely profitable, console manufacturers realized they could control their entire ecosystem. Proprietary formats, region systems, and lockout chips were all valid ways to ensure companies could levy hefty licensing fees from developers. They locked down their hardware tighter than a bank vault, and they did it for one simple reason—money. As long as the manufacturer could ensure the console wouldn’t run unapproved games, developers would have to give them a kickback for every unit sold.
+By and large, the market accepted this. Consoles were single-purpose entertainment machines. Nobody expected to run their own software on a Nintendo, after all. The deal was simple—you bought a console from whichever company, and it would only play whatever they said was okay. The vast majority of consumers didn’t care about the specifics. As long as the console in question had a decent library, few would complain.
+There was always an underground—adapters to work around region locks, and bootleg games that relied on various hacks—with varying popularity over the years. Often, it was high prices that drove this innovation—think of the many PlayStation mod chips sold to play games off burnt CDs to avoid paying retail.
+At the time, this approach largely stayed within the console gaming world. It didn’t spread to actual computers because computers were tools. You didn’t buy a PC to consume content someone else curated for you. You bought it to do whatever you wanted—write a novel, make a spreadsheet, play games, create music, or waste time on weird hobby projects. The openness wasn’t a bug, or even something anybody really thought about. It was just how computers were. It wasn’t just a PC thing, either—every computer on the market let you run what you wanted! It wasn’t just desktops and laptops, either; the nascent tablets and PDAs of the 1990s operated in just the same way.
+Then came the iPhone, and with it, the App Store. Apple took the locked-down model and applied it to a computer you carry in your pocket. The promise was that you’d only get apps that were approved by Apple, with the implicit guarantee of a certain level of quality and functionality.
+It was a bold move, and one that raised eyebrows among developers and technology commentators. But it worked. Consumers loved having access to a library of clean and functional apps, built right into the device. Meanwhile, they didn’t really care that they couldn’t run whatever kooky app some random on the Internet had dreamed up.
+Apple sold the walled garden as a feature. It wasn’t ashamed or hiding the fact—it was proud of it. It promised apps with no viruses and no risks; a place where everything was curated and safe. The iPhone’s locked-down nature wasn’t a restriction; it was a selling point.
+But it also meant Apple controlled everything. Every app paid Apple’s tax, and every update needed Apple’s permission. You couldn’t run software Apple didn’t approve, full stop. You might have paid for the device in your pocket, but you had no right to run what you wanted on it. Someone in Cupertino had the final say over that, not you.
+When Android arrived on the scene, it offered the complete opposite concept to Apple’s control. It was open source, and based on Linux. You could load your own apps, install your own ROMs and even get root access to your device if you wanted. For a certain kind of user, that was appealing. Android would still offer an application catalogue of its own, curated by Google, but there was nothing stopping you just downloading other apps off the web, or running your own code.
+Sadly, over the years, Android has been steadily walking back that openness. The justifications are always reasonable on their face. Security updates need to be mandatory because users are terrible at remembering to update. Sideloading apps need to come with warnings because users will absolutely install malware if you let them just click a button. Root access is too dangerous because it puts the security of the whole system and other apps at risk. But inch by inch, it gets harder to run what you want on the device you paid for.
+Windows Watches and Waits
+The walled garden has since become a contagion, with platforms outside the smartphone space considering the tantalizing possibilities of locking down. Microsoft has been testing the waters with the Microsoft Store for years now, with mixed results. Windows 10 tried to push it, and Windows 11 is trying harder. The store apps are supposedly more secure, sandboxed, easier to manage, and straightforward to install with the click of a button.
+Microsoft hasn’t pulled the trigger on fully locking down Windows. It’s flirted with the idea, but has seen little success. Windows RT and Windows 10 S were both locked to only run software signed by Microsoft—each found few takers. Desktop Windows remains stubbornly open, capable of running whatever executable you throw at it, even if it throws up a few more dialog boxes and question marks with every installer you run these days.
+How long can this last? One hopes a great while yet. A great deal of users still expect a computer—a proper one, like a laptop or desktop—to run whatever mad thing they tell it to. However, there is an increasing userbase whose first experience of computing was in these locked-down tablet and smartphone environments. They aren’t so demanding about little things like proper filesystem access or the ability to run unsigned code. They might not blink if that goes away.
+For now, desktop computing has the benefit of decades of tradition built in to it. Professional software, development tools, and specialized applications all depend on the ability to install whatever you need. Locking that down would break too many workflows for too many important customers. Masses of scientific users would flee to Linux the moment their obscure datalogger software couldn’t afford an official license to run on Windows;. Industrial users would baulk at having to rely on a clumsy Microsoft application store when bringing up new production lines.
+Apple had the benefit that it was launching a new platform with the iPhone; one for which there were minimal expectations. In comparison, Microsoft would be climbing an almighty mountain to make the same move on the PC, where the culture is already so established. Apple could theoretically make moves in that direction with OS X and people would be perhaps less surprised, but it would still be company making a major shift when it comes to customer expectations of the product.
+Here’s what bothers me most: we’re losing the idea that you can just try things with computers. That you can experiment. That you can learn by doing. That you can take a risk on some weird little program someone made in their spare time. All that goes away with the walled garden. Your neighbour can’t just whip up some fun gadget and share it with you without signing up for an SDK and paying developer fees. Your obscure game community can’t just write mods and share content because everything’s locked down. So much creativity gets squashed before it even hits the drawing board because it’s just not feasible to do it.
+It’s hard to know how to fight this battle. So much ground has been lost already, and big companies are reluctant to listen to the esoteric wishers of the hackers and makers that actually care about the freedom to squirt whatever through their own CPUs. Ultimately, though, you can still vote with your wallet. Don’t let Personal Computing become Consumer Computing, where you’re only allowed to run code that paid the corporate toll. Make sure the computers you’re paying for are doing what you want, not just what the executives approved of for their own gain. It’s your computer, it should run what you want it to!
+
+--------------------------------------------------------------------------------
+=== Article 8: Show HN: MyraOS – My 32-bit operating system in C and ASM (Hack Club project) ===
+
+Content:
+A x86 Unix-like OS made entirely from scratch.
+Features
+- Protected mode (GDT/IDT, ISRs/IRQs)
+- Paging and virtual memory
+- Memory management
+- Heap and dynamic memory
+- User-mode (ring 3) and kernel mode (ring 0)
+- Processes and scheduling
+- Drivers (PIT, RTC, Keyboard, Mouse, Framebuffer, PATA)
+- ext2 filesystem
+- UI compositor with window widgets, labels, icons, buttons, and even a custom-made font
+- ELF loader, which gives you the ability to run real apps
+All these features let you run real games, just like Doom, giving the preloaded Doom port in MyraOS ready to be played!
+So, this isn't just a toy OS or a look-alike, it's a real OS that can run on real devices
+- Download the latest release from the release tab in GitHub
+- Download QEMU - an open-source machine emulator and virtualizer
+After you get the latest release, you can run this on your platform:
+Normal
+qemu-system-i386 -cdrom MyraOS.iso -drive file=fs.img,format=raw,if=ide,index=0 -m 1024
+Fullscreen (if you are like me and want it to look real)
+qemu-system-i386 -cdrom MyraOS.iso -drive file=fs.img,format=raw,if=ide,index=0 -m 1024 -full-screen
+Normal
+qemu-system-i386 -cdrom MyraOS.iso -drive file=fs.img,format=raw,if=ide,index=0 -m 1024
+Fullscreen
+qemu-system-i386 -cdrom MyraOS.iso -drive file=fs.img,format=raw,if=ide,index=0 -m 1024 -display gtk,zoom-to-fit=on -full-screen
+Here, Linux/macOS or even WSL are better; use it as a last resort:
+Normal
+qemu-system-i386 -cdrom MyraOS.iso -drive file=fs.img,format=raw,if=ide,index=0 -m 1024
+Fullscreen
+qemu-system-i386 -cdrom MyraOS.iso -drive file=fs.img,format=raw,if=ide,index=0 -m 1024 -display gtk,zoom-to-fit=on -full-screen
+I really hope you like it, as I spent a lot of time on it, and I'd really appreciate any feedback you have for me.
+If you have anything, from feature requests to feedback, or even if you want to talk, email me here: dvirm.biton@gmail.com
+.
+
+--------------------------------------------------------------------------------
+=== Article 9: Ken Thompson recalls Unix's rowdy, lock-picking origins ===
+
+Content:
+Ken Thompson Recalls Unix’s Rowdy, Lock-Picking Origins
+The 82-year-old Ken Thompson has some amazing memories about the earliest days of the Unix operating system — and the rowdy room full of geeks who built it.
+This month Silicon Valley’s Computer History Museum released a special four-and-a-half-hour oral history, in partnership with the Association for Computing Machinery, recorded 18 months ago by technology historian David C. Brock. And Thompson dutifully recalled many of his career highlights — from his work on the C programming language and Unix to the “Plan 9 from Bell Labs” operating system and the Go programming language.
+But what comes through is his gratefulness for the people he’d worked with, and the opportunity they’d had to all experiment together in an open environment to explore the limits of new and emerging technologies. It’s a tale of curiosity, a playful sense of serendipity and the enduring value of a community.
+And along the way, Thompson also tells the story of raising a baby alligator that a friend sent to his office at Bell Labs. (“It just showed up in the mail… They’re not the sweetest of pets.”)
+The Accidental Birth of Unix
+Travel back in time to 1966, when 23-year-old Thompson’s first project at Bell Labs was the ill-fated Multics, a collaboration with MIT and General Electric which Thompson remembers as “horrible… big and slow and ugly and very expensive,” requiring a giant specially-built computer just to run and “just destined to be dead before it started.”
+But when the Multics project died, “the computer became completely available — this one-of-a-kind monster computer… and so I took advantage.”
+Thompson had wanted to work with CRAM, a data storage device with a high-speed drum memory, but like disk storage of the time, it was slow to read from memory.
+Thompson thought he’d improve the situation with simultaneous (and overlapping) memory reads, but of course this required programs for testing, plus a way to load and run them.
+“And suddenly, without knowing it — I mean, this is sneaking up on me…. Suddenly it’s an operating system!” Thompson’s initial memory-reading work became “the disk part” for Unix’s filesystem. He still needed a text editor and a user-switching multiplexing layer (plus a compiler and an assembler for programs), but it already had a filesystem, a disk driver and I/O peripherals.
+Thompson wondered if it took so long to recognize its potential because he’d been specifically told not to work on operating systems. Multics “was a bad experience” for Bell Labs, he’d been told. “We spent a ton of money on it, and we got nothing out of it!”
+“I actually got reprimands saying, ‘Don’t work on operating systems. Bell Labs is out of operating systems!”
+One-Digit User IDs
+But now Unix had its first user community — future legends like Dennis Ritchie, Doug McIlroy, Robert Morris and occasionally Brian Kernighan. (“All the user IDs were one digit. That definitely put a limit on it.”) Thompson remembers designing the Unix filesystem on a blackboard in an office with Rudd Canaday — using a special Bell Labs phone number that took dictation and delivered a typed-up transcript the next day. And Joe Ossanna “got things done” with a special talent for navigating Bell Labs’ bureaucracy that ultimately procured a crucial PDP-11 for the Unix team to work on.
+“We were being told no, ‘because we don’t deal in operating systems.'” But Ossanna knew the patent department was evaluating a third-party system for preparing documents — and Ossanna proposed an in-house alternative. “So we got our first PDP-11 to do word processing.”
+And history shows that it happened partly because the department paying for it “had extra money, and if they didn’t spend it, they’d lose it the next year…”
+So the young Unix community picked up somewhere between five and eight new users, Thompson remembers, “the secretaries for the Patent Department, writing patents on our system!”
+The Fellowship of the Unix Room
+That PDP-11 wound up in “a spot on the sixth floor where we cleaned out a vending machine and a couple of cages of stored junk from 1920,” Thompson remembered. They eventually installed a second PDP-11, which turned the room into “a hotbed of things,” with discussions about networking — and an upcoming typesetter for documents. Thompson calls it the Unix room, and most of them eventually had extensions for their phones wired into the room. (It even had its own call-switching PBX …)
+There was camaraderie and some laughter. He adds later, almost as an aside, that “in the Unix room, we used to pick locks a lot and steal things.” (When one of the secretaries discovered security had affixed a “parking boot” to her car that was parked in the wrong zone, “we went down there, and we picked the lock and stole the boot. And after that, slowly, we picked up all four boots, and we hid them under the raised floor of the Unix room…”)
+The punchline? “The head of security came around and pleaded with us. ‘We won’t pick on your secretaries if you give us back our boots.'”
+And the deal was accepted.
+Thompson remembers things like gathering for a regular “Unix lunch” in the Bell Labs lunchroom, which “caused a symbiosis of thought and things. It was great.” Although it always seemed to happen just minutes after the lunchroom stopped serving food. “If I was late, I’d buy McDonald’s and sit down at the lunchroom with my McDonald’s. They used to get mad at me for that …”
+Growing From Community
+Looking back, Thompson credited the success of C and Unix to Bell Labs and its no-pressure/no users environment. “It was essentially a ‘whatever you want to do’ atmosphere, and ‘for anybody you wanted to do it for’… Bell Labs was by far the biggest contributor to this whole type of programming.”
+Bell Labs was an eclectic mix, but this community paid unexpected dividends. While Lee McMahon was originally hired as a linguistics researcher, he was ultimately the one who procured machine-readable dictionaries for the Unix team, along with machine-readable version of the Federalist Papers. (When the whole text wouldn’t fit into their text editor ed, Thompson famously created the line-by-line pattern-scanning tool grep.)
+And in the end Thompson says Unix grew from there for one simple fact: People liked it. It spread within Bell Labs, at first for “the administrative kind of stuff, typing in trouble tickets…” But this being a phone company, “then it started actually doing some switching, and stuff like that. It was getting deeper and deeper into the guts of the Bell System and becoming very popular.”
+Open Before Open Source
+Thompson credits Richard Stallman with developing much more of the open source philosophy. “But Unix had a bit of that.” Maybe it grew out of what Dennis Ritchie was remembering, that fellowship that formed around Unix. “For some reason, and I think it’s just because of me and Dennis, everything was open…”
+It was just the way they operated. “We had protection on files — if you didn’t want somebody to read it, you could set some bits and then nobody could read them, right? But nobody set those permissions on anything … All of the source was writable, by anybody! It was just open …
+“If you had an idea for an editor, you’d pull the editor out and you’d write on it and put it back … There was a mantra going around that, ‘You touch it, you own it.'”
+Thompson provides an example: Bell Labs co-worker P. J. Plauger, with whom he later wrote the 1974 book “Elements of Programming Style.” Plauger was also a professional science fiction writer, Thompson remembers, “And whatever he was writing on was in his directory, right? So, we’d all go in there and be reading it as he’s writing it … and we’d all write back, ‘You ought to kill this guy, and move him over here and turn him green!’ or something.
+“And he didn’t mind it, because that’s just the theory of Unix in those days …
+“I think that generated a fellowship. Just the fact that it was like writing on a blackboard — everybody read it.”
+And more of their Bell Labs experiments found their way into the world when some work on the later Plan 9 operating system found its way into the UTF-8 standard, which underlies most of today’s web connections.
+After Bell Labs
+Thompson left Bell Labs in 2000, after the breakup of the Bell system. (“It had changed; it was really different … You had to justify what you were doing, which is way above my pay grade.”) But his three decades there seemed to shine an influence over the rest of his life.
+Thompson first moved on to a networking equipment company called Entrisphere, where he worked for six years — and a move to Google was the natural next step. The head at Entrisphere had already moved to Google, and was urging Thompson to follow him — and it turned out that Google CEO Eric Schmidt was an old friend who’s actually worked at Bell Labs in 1975. (Thompson says Google made him “an exceedingly good offer”…)
+At Google Thompson worked “a little bit” on Android security. (“I found a couple of specific problems, but by and large, it was very well done”.) But eventually Thompson joined the three-person team that would create the programming language Go.
+And he was doing the work with Rob Pike, who was one of his old comrades from Bell Labs nearly 30 years before!
+
+--------------------------------------------------------------------------------
+=== Article 10: Don't forget these tags to make HTML work like you expect ===
+
+Content:
+Don’t Forget These Tags to Make HTML Work Like You Expect
+I was watching Alex Petros’ talk and he has a slide in there titled “Incantations that make HTML work correctly”.
+This got me thinking about the basic snippets of HTML I’ve learned to always include in order for my website to work as I expect in the browser — like “Hey I just made a .html
+file on disk and am going to open it in the browser. What should be in there?”
+This is what comes to mind:
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+Why each?
+doctype
+<!doctype html>
+Without <!doctype html>
+, browsers may switch to quirks mode, emulating legacy, pre-standards behavior. This will change how calculations work around layout, sizing, and alignment.
+<!doctype html>
+is what you want for consistent rendering. Or <!DOCTYPE HTML>
+if you prefer writing markup like it’s 1998. Or even <!doCTypE HTml>
+if you eschew all societal norms. It’s case-insensitive so they’ll all work.
+html lang
+<html lang="en">
+Declare the document’s language. Browsers, search engines, assistive technologies, etc. can leverage it to:
+- Get pronunciation and voice right for screen readers
+- Improve indexing and translation accuracy
+- Apply locale-specific tools (e.g. spell-checking)
+- And more…
+Omit it and things will look ok, but lots of basic web-adjacent tools might get things wrong. Specifying it makes everything around the HTML work better and more accurately, so I always try to remember to include it.
+meta utf-8
+This piece of info can come back from the server as a header, e.g.
+return new Response(
+"<!doctype html><h1>Hello world</h1>",
+{
+status: 200,
+headers: { "Content-Type": "text/html; charset=utf-8" },
+}
+);
+But I like to set it in my HTML, especially when I’m making files on disk I open manually in the browser.
+<meta charset="utf-8">
+This tells the browser how to interpret text, ensuring characters like é, ü, and others display correctly.
+So many times I’ve opened a document without this tag and things just don’t look right — like my smart quotes.
+For example: copy this snippet, stick it in an HTML file, and open it on your computer:
+<!doctype html>
+<h1>Without meta utf-8</h1>
+<dl>
+<dt>Smart quotes</dt>
+<dd>“” and ‘’</dd>
+<dt>Symbols</dt>
+<dd>©, ™, ®, etc.</dd>
+<dt>Ellipsis</dt>
+<dd>…</dd>
+<dt>Emojis</dt>
+<dd>👍</dd>
+<dt>Non-latin characters</dt>
+<dd>é, ñ, etc.</dd>
+</dl>
+Things might look a bit wonky. But stick a <meta charset="utf-8">
+tag in there and you’ll find some relief.
+Meta viewport
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+Sometimes I’ll quickly prototype a little HTML and think, “Great it’s working as I expect!” Then I go open it on mobile and everything looks tiny — “[Facepalm] you forgot the meta viewport tag!”
+Take a look at this screenshot, where I forgot the meta viewport tag on the left but included it on the right:
+That ever happen to you? No, just me? Well anyway, it’s a good ‘un to include to make HTML work the way you expect.
+Last But Not Least…
+I know what you’re thinking, I forgot the most important snippet of them all for writing HTML:
+<div id="root"></div>
+<script src="bundle.js"></script>
+Lol.
+
+--------------------------------------------------------------------------------
+=== Article 11: You are how you act ===
+
+Content:
+You Are How You Act
+The modern American self is best defined by two Enlightenment thinkers who never met but have been arguing in our heads ever since.
+Jean-Jacques Rousseau believed in the primacy of the inner self: a core of goodness constantly betrayed by circumstance. In his view, the world corrupts us. We begin pure and only fail because society, obligation, or expectation pulls us away from who we truly are.
+Benjamin Franklin saw it differently. For him there was no such thing as a good person or a bad person, only people who do good things and people who do bad things. Virtue was a habit, not an essence.
+Modern America carries both of these ideas, switching between them whenever convenient. We invoke Rousseau when we need forgiveness: I meant well. We invoke Franklin when we need accountability: Show me what you’ve done. It’s an almost entirely incompatible pair of philosophies that coexist perfectly in practice because they’re both so flattering — one to our intentions, the other to our ambition.
+But only one of them scales.
+“Fake it until you make it” is often dismissed as shallow, but it’s closer to Franklin’s truth. Faking it long enough is making it. The repetition of behavior, not the sincerity of belief, is what shapes character. You become the kind of person who does the things you repeatedly do.
+Rousseau invites endless introspection. Franklin invites progress. The first is about how you feel; the second is about what you build.
+I find the Franklin model far more useful. Not because it’s truer in some cosmic sense, but because it gives you agency. You can’t always change how you feel, but you can always decide what to do next.
+“It doesn’t take great men to do things, but it is doing things that make men great.” — Arnold Glasow
+
+--------------------------------------------------------------------------------
+=== Article 12: Why I'm teaching kids to hack computers ===
+
+Content:
+Why I’m teaching kids to hack computers
+Paul Hudson, @twostraws, October 22nd 2025
+When I was a teen, I learned about computers by trying things, breaking things, and fixing them again – relentless curiosity and experimentation, backed up by computers being much more open to investigation, allowed me to learn and grow.
+Today’s computers are a lot more polished and a lot more safe, and I get why – most folks don’t want to think about the command line, don’t care about binary, and don’t even know about packet sniffing.
+But I’m really keen to bring back the same experiences I had for a new generation, so I decided to do something about it: I built a huge “capture the flag” game that teaches kids 13+ how to do SQL injection, how to use rainbow tables to figure out hashes, how to use steganography to hide data in images, and more.
+My goal was to take just a little of the glorified theatre you usually see in movies – the look and feel of games I loved like Syndicate, Command & Conquer, and Uplink – and mix it in with real-world skills around networking, cryptography, digital forensics, and more, to create something that teaches kids core computer science skills in a fun way.
+I want to talk about my goals when building the app, some of the challenges I hit, the technology that’s used, and more – I hope it’s useful!
+If you want to skip the reading and just try the app yourself, click here.
+What’s the problem?
+There’s an abundance of “learn to hack” material already out there, but a lot of it has one or more problems:
+- It can be dry and academic, focusing on reading theory and answering questions.
+- It’s often available only to specific groups at specific times, e.g. national cybersecurity competitions.
+- You get challenges that are very interesting, but no guidance how to solve them.
+- They often use shared resources, so you can’t do things like rewrite database entries or delete files.
+Some of these are inevitable – if you want a serious career in cybersecurity, you do need to sit down and study a whole lot of theory!
+But together these problems can create an off-putting environment: students want to know they are dealing with real tools and technologies, but they also want a clear path, they want some guidance how to move forward, and they also want it to feel exciting, particularly when they are just starting out.
+That’s the gap I’m trying to fill – to make something structured, with scaffolded challenges that feel cinematic but teach practical skills.
+The end result is live now: it’s called Hacktivate, and it’s available on iPhone, iPad, and Mac. It’s available in two editions:
+- One-time upfront payment, with no in-app purchases
+- Free to play, with in-app purchases for the game and hints
+Both deliver the same challenges and functionality.
+Building a safe place to break things
+I decided to try building something that solved these problems. Something that:
+- Provides 240 “capture the flag” challenges around things like SQL injection, the Linux command line, JavaScript, hashing, encryption, and more.
+- Teaches students the core computing, security, and logic skills needed to solve all those challenges.
+- Uses safe sandboxing, so that all data, servers, and hacks are done inside the game rather than affecting real targets.
+My goal is not to turn everyone into a seasoned pentester overnight, but just to inspire a new generation of hackers to experiment, learn, and have fun in a safe and structured way.
+As you might imagine, this took a lot of work.
+Part of that work was building tools to simulate real-world data in a self-contained app – packet sniffing, network routing, DNS lookups, etc, all need to be able to work without the user leaving the app and even if they are offline. (I have cached DNS results for the servers used in challenges!)
+But honestly the biggest part of the work was just crafting all the challenges. If this were a platform game I could just make the core game engine then put different levels in there. In contrast, cybersecurity challenges can’t repeat because it wouldn’t be fun – every challenge has to be more or less unique.
+For example, in one challenge you need to discover that one PNG file actually contains several, another challenge mixes decimal/hex/octal ASCII values to spell a message, another one hides the flag in a regex crossword, and yet another one makes you log into a virtual email inbox to find the next target of a cybercriminal gang.
+What hacking looks like inside Hacktivate
+There are a whole bunch of different challenges in the game, but I want to pick out a handful of them and also talk about how they were implemented.
+- Basic data-handling questions – hex, binary, ASCII, base64, and similar. These teach students about data representation, and were probably the easiest to make because it’s really just about them learning to recognize what things like hex look like.
+- Cryptography challenges. These start out with classic codes and ciphers (Caesar, Vigenère, Morse, etc) but then move onto modern hashes and encryption with SHA1/2/3, Enigma, and AES. These got increasingly hard to make, because you want to give students just enough information to figure out the answer themselves without revealing too much.
+- Browser-based challenges, all running locally on the user’s device. These start out trivial (passwords written in a HTML comment), move up through things like HTTP headers and cookies, then go onto to things like IDOR, SQL injection, and similar. These were surprisingly easy to make, mostly because there are so many web-based vulnerabilities to choose from Internally the app runs a private web server so I can dynamically adjust page content as they progress through challenges.
+- Terminal-based challenges, again all running locally on the user’s device. This was the hardest set of challenges to create, mostly because I need to ship the app on Apple’s platforms! So, I ended up creating a Linux terminal emulator, along with various core commands (ps, cat, netstat, nc, strings, sudo, etc), that lets me set up challenges such as rogue servers running, curious commands in the user’s history, files that are owned by different users, etc.
+- Networking challenges. Again these start out quite simple (can you find the optimum route from A to B? Here are a bunch of IP addresses – which one contains the flag?), but then get tougher with things like packet sniffing, ARP spoofing, and similar.
+- Steganography challenges, which are quite different from the regular cryptography challenges. As with the others these start out simple (“if you reverse the audio and speed it up you can hear a voice!”), but end up with more complex challenges – “if you read the least significant bits of this audio file and treat them all as grayscale image data, you get the flag.”
+And those are just some of them.
+Students learn about regex crosswords, substitution ciphers, robots.txt, Unicode, OSINT, logic gates, and so much more. Heck, there’s a whole virtual assembly language used in some of the challenges!
+No matter what the player does, one nice thing about the app running on a local device is that it’s completely private – there are no trackers, no analytics, no adverts, no cookies, or similar. Everything you do is private to you and only you.
+Note: There’s a separate version of Hacktivate that removes all in-app purchases, instead relying on a single, upfront purchase. If you’re not fond of micro-transactions (fair!), or you work at schools where in-app purchases aren’t possible, you should download Hacktivate: Education Edition instead.
+Under the hood
+The entire app is written in Swift and SwiftUI, which allows me to target iPhone, iPad, and Mac. I have no doubt that will make a certain group of people roll their eyes, but honestly Apple has been supportive every step of the way – they have provided lots of help and guidance to make the app the best it can be, even providing code-level support when I hit issues.
+(And if you’re dead set against Apple devices, you should check out the web version of Hacktivate – it’s not as powerful or as fun, but it’s entirely web-based and free!)
+Some AI was used in the creation of the app, but it was mainly in the app’s “toolbox” – it’s my own little version of CyberChef, where users can create recipes to transform data in a variety of ways to hunt for flags.
+Some of the tools in this toolbox were hard to create, and AI did a fantastic job here. For example, the Enigma machine implementation was almost entirely AI, as were parsing SSH host keys, the SHA family of hashes, and transforming audio. These are fairly complex, precise algorithms, and – with some careful prompting – Claude did a great job of implementing them correctly.
+However, the vast majority of the app was written by me, by hand, because AI just isn’t very good at being original. I wanted challenges that felt crafted and intentional, so that users could feel their progression grow over time, as opposed to just throwing out a couple of hundred random AI ideas.
+The final tally, as of today: 45,132 lines of Swift code, 164,680 lines of JSON, plus some HTML, CSS, Markdown, etc. The JSON contains challenge information, but also all the simulated data – things like virtual email inboxes, terminal configurations, packet captures, etc, and even a whole social network that’s used in exactly one challenge.
+Outside my own work, I worked with a few different designers from Fiverr on things like team and player icons, used open-source libraries such as SQift to let users manipulate a local database with SQL, and used Creative Commons media from Brad Sucks and similar, so that I had interesting things to hide flags inside.
+I made a YouTube video walking through various parts of the Hacktivate code:
+Influences from old-school games
+Even though it’s powered by real-world skills, I wanted Hacktivate to get just a bit of the “Hollywood hacker” aesthetic – to be a bit retro and a bit cool, so that students felt it was more fun.
+I was hugely inspired by three games I love:
+- The core of the UI was hugely inspired by the game Syndicate by Bullfrog Productions. The green-screen UI, having screens draw themselves with a laser, the squared-off map with icons, etc; this was one of the first things I built, because I knew I wouldn’t continue unless I felt it was fun too.
+- Other parts of the UI – particularly text rendering and animations – were inspired by Command & Conquer by Westwood Studios.
+- Finally, the game Uplink by Introversion Software gave me lots of ideas, although our approach is quite different – they go hard down the Hollywood hacker route, whereas Hacktivate tries to stay anchored to real skills.
+I think the result works well: the interface feels suitably fun and retro, there’s a light sprinkling of animation, particle effects, and haptics to add little bits of surprise and delight, and it still manages to cram in all the power tools people need to solve the challenges.
+Here’s a video of the C&C installer from their remastered edition – I think the parallels are pretty clear!
+Where it goes next
+My goal is obviously not to create a horde of black hat hackers, but instead to create something that’s fun and engaging, to provide opportunities for students to learn in a safe way, and I hope also to inspire new people to consider cybersecurity as a career – with all the recent hacks on Jaguar Land Rover, Asahi, F5, and similar, the demand has never been higher.
+But even if students just use it to have some fun, I at least hope it makes them better equipped to spot scams, secure their own data, and reason about online privacy.
+There’s still plenty to improve in the app:
+- Improving screenreader support is my #1 focus right now, so the game is as accessible as I can make it.
+- I’m considering adding some sort of leaderboard system, although I want to make sure it’s done in a privacy-preserving way to match the rest of the app.
+- I’d like to add support for achievements, badges, etc, as the user completes challenges. Apple offers Game Center for this, which would be a fun addition.
+I’ll also keep trying to refine the iPhone UI. The app is really packed with functionality, and getting that down to a phone-sized screen was no mean feat.
+Want to try it?
+If you like puzzles, packet captures, or following breadcrumbs where they shouldn’t be, Hacktivate is live on the App Store.
+You can try 10 tutorial challenges for free, and unlock 240 more with a one-time purchase. When you buy the unlock it works on all your Apple devices, with your progress automatically synced between them.
+I’d love to hear what you think, or what kinds of challenges you’d like to see next!
+About Paul Hudson
+Paul Hudson is the creator of Hacking with Swift, the world's largest website dedicated to building apps for Apple's platforms.
+Paul has been building apps for iPhone since 2009, and in that time has worked with teams at Apple, Autodesk, UBS, Xerox, and more.
+Paul lives in Bath, England with his two daughters and two dogs.
+Contact details
+- Email: paul@hackingwithswift.com
+- Twitter: @twostraws
+- Mastodon: @twostraws
+- GitHub: @twostraws
+
+--------------------------------------------------------------------------------
+=== Article 13: Sandhill cranes have adopted a Canada gosling ===
+
+Content:
+These Sandhill Cranes Have Adopted a Canada Gosling, and Birders Have Flocked to Watch the Strange Family
+Ornithologists and locals wonder what the future holds for this chick being raised by much taller, but still doting parents
+The first time I saw the family, I did a double take. Two tall sandhill crane parents strutted through the marsh, their downy red colt toddling behind them. And then, just a few steps later, came another chick—rounder, fluffier and distinctly yellow. A Canada gosling.
+In a small pond in Madison, Wisconsin, a pair of sandhill cranes is raising a baby Canada goose as their own. The combination appears to be only the third confirmed instance of such a cross-species adoption—which was observed previously in Michigan in 2019, and again just last year in Madison. However, an unusual sighting in Alaska in 2011, when a Canada goose was seen living with and behaving like a crane, suggests this kind of adoption may have happened even earlier.
+These rare adoptions may be happening more often for several reasons, says Anne Lacy, director of eastern flyway programs at the International Crane Foundation. Sandhill cranes and Canada geese populations have both rebounded in recent decades and, like foxes and coyotes, have proved remarkably adept at moving into urban landscapes. That adaptability has brought them into closer proximity. Geese, which are grazers, can thrive in a wide range of developed spaces, including manicured retention ponds. Cranes, by contrast, are omnivores that still seek out wetlands with more habitat diversity. Suburban wetlands with semi-natural edges—where mowed lawns meet natural vegetation—often offer enough habitat for cranes while still supporting geese, creating an area of ecological overlap. In these shared spaces, the chances for unusual interactions are much higher. At the same time, people are paying closer attention to birds, notes Lacy, and are focusing on this pairing because it’s weird.
+Exactly how the gosling ended up with the cranes remains in dispute. Some local photographers believe a Canada goose laid an egg in the cranes’ nest. Others think the cranes took over a goose nest—which already contained a goose egg—after spring floods washed out theirs. Whatever the origin, one thing is certain: When the gosling hatched, it imprinted on the cranes and now follows them as if it were one of their own.
+Marjorie Rhine, a local photographer, was one of the first to witness the unusual family. While watching a nesting crane keeping a chick warm beneath its feathers, she was startled when a bright yellow gosling popped out instead of a crane colt. “It’s just hard for your brain to compute. It’s not supposed to be bright yellow,” she says. What struck her most, though, was the way the parent responded. “It just seemed really loving,” she explains.
+I watched a similarly surreal and moving scene—a sleek-legged crane doting tenderly on a yellow ball of fluff tucked beside it.
+Since then, photographers have captured hours of video footage and thousands of images of the unusual family. Many have watched the cranes treat the gosling just like their own colt: feeding, sheltering and defending it—even from the gosling’s presumed biological parents, a Canada goose pair that have repeatedly tried to reclaim the gosling.
+Numerous observers have seen the geese approach the crane family—circling the nest, honking loudly and even charging at the cranes. But when the geese got too close, “Dad was there with his mighty wings,” says Alan Ginsberg, a local photographer who witnessed several such confrontations.
+Why the cranes accepted the gosling likely comes down to timing and hormones. Michael Ward, an ornithologist at the University of Illinois Urbana-Champaign, has seen just how flexible sandhill cranes can be. He recalls one case where a pair tried to incubate a red rubber ball that had found its way into their nest. And once a chick hatches, the adults are hormonally primed to parent it. “They’re in this maternal or paternal phase, and they’re being protective and supportive,” says Ward.
+While the cranes may not care that the gosling waddling after them isn’t biologically theirs, its future is far from certain. Geese and cranes differ in many ways, such as diet, behavior and migration strategies. Cranes feed their young insects, worms and the occasional small mammal. Geese are grazers, built to forage independently. “When I first heard about this last year, I had some real concerns about the gosling,” says Lacy. “They eat very different things.”
+I’ve noticed some of their differences when observing them. Instead of nibbling on grass like a typical gosling, this one eagerly slurps down worms offered by its crane parents. The gosling is also a far stronger swimmer than its adoptive parents—zipping circles around them in the water—though it’s clumsier on land as it tries to match the adults’ long-legged stride.
+As the gosling matures, migration could present another challenge. “There could be an issue when they become flighted,” Ward says. “Cranes fly higher and migrate at different times of the year than geese do. … By the time it’s got to migrate, something’s going to give.” Cranes often fly at around 5,000 feet—so high they’re often barely visible—while geese typically migrate between 1,000 and 3,000 feet or lower. Their timing also differs: Geese tend to begin migrating in September, if they migrate at all, while cranes from Wisconsin usually depart in October or November—after the first cold snap. Cranes also often travel longer distances to wintering grounds in the southeastern United States, while geese often remain in the Midwest. “It is possible the adopted goose would migrate with the cranes,” Ward says, but “I would expect it would have trouble physiologically.”
+Whether the gosling will make it to adulthood and attempt to migrate remains an open question. While the crane parents are attentive, both of its chicks face risks. The biggest threats to young cranes—and, now, to this gosling—are land-based predators like raccoons, foxes and coyotes, particularly in the early mornings or evenings when the family is out foraging, explains Lacy. Aerial predators like great horned owls are less common, but possible. And snapping turtles, which inhabit the pond, add another threat.
+Not all stories like this have happy endings. With the two previously documented adoptions, neither gosling survived. The gosling in Michigan died of unknown causes. The one in Madison last year was killed by a dog. “It was a golden retriever on one of those stretchy leashes, and it got the gosling in its mouth,” recalls Cynthia Carlson, a photographer who documented the 2024 adoption, as well as this year’s. The gosling was taken to a wildlife rescue but died shortly after. “I was so sad that we didn’t get to see how the whole situation ended up,” she says.
+Despite the challenges that the gosling faces, local observers still have reasons for hope. Sandhill cranes are known for strong nest site fidelity, often defending the same territory season after season. Ralph Russo, another local photographer who has been photographing the cranes here for a long time, notes the pair at this site have successfully raised multiple offspring over the years. That experience could give both chicks a better-than-average shot, says Lacy. “Nobody likes to see baby animals not make it,” she adds. “But quite honestly, that’s the rule, not the exception.”
+Ward notes that while a gosling raised by cranes may have a reduced chance of survival, death is far from the only potential outcome. “It’s not like it’s doomed to die,” he says. He also believes the gosling could rejoin its own species, a sentiment that Lacy echoes. “It may just incorporate itself into a gaggle of geese,” she notes.
+How this unusual tale will end is uncertain, but Ward hopes people also appreciate the bigger picture. The eastern population of sandhill cranes—which primarily nest in Wisconsin, Michigan and Ontario—has rebounded from fewer than 20,000 birds in 1979 to around 110,000 in 2023 thanks to habitat protection and regulated hunting. Canada geese have experienced a similarly remarkable recovery, increasing from 1.26 million in 1970 to around seven million today. “Fifty years ago, neither species was around here,” Ward explains. “Conservation has brought both of these species back.”
+Each time I visit the pond, I find myself lingering longer than planned, watching the family alongside other photographers, birders and curious onlookers. Each visitor may take away something different, but Russo’s words resonate with me: “It reminds me of the pleasure of just being in nature and being surprised by what nature can do,” he says. “It’s been wonderful and joyful and fascinating to witness.”
+
+--------------------------------------------------------------------------------
+=== Article 14: Sphere Computer – The Innovative 1970s Computer Company Everyone Forgot ===
+
+Content:
+About Sphere
+The Sphere 1 was a product of Sphere Corporation, launched in 1975 by Mike Wise in Bountiful, Utah. It was an all-in-one integrated microcomputer based on the new Motorola 6800 platform. It was ahead of its time; it was also delayed, somewhat difficult to use and frequently flaky. Sphere Corp itself disappeared in 1977, and Sphere was soon a punchline, then a footnote.
+The Sphere computer may have been at its heart a hobbyist's machine, but its design and capabilities prefigured the mass-market computers that would become ubiquitous just a few years later.
+More Sphere history....
+About this project
+I'm Ben Zotto, a research historian, engineer, and writer from California. I'm assembling the story of Sphere-- a unique computer, and the unique company who built it and the people who used it. In addition to maintaining this site, I've written a book that will document thousands of hours of research; check it out!.
+As part of this project, I've built a virtual web emulator for the standard Sphere configuration, including the first new game for the Sphere in 40+ years. 👾 😂 Try computing like it's 1975. I've also created the first new Sphere hardware since the 1970s.
+Do you have Sphere hardware, software, paperwork or stories?
+I'd dearly love to hear from you. Sphere systems and kits were produced in small numbers; they were often unloved even in their time and are now quite obscure. Some material has been thankfully preserved, but there's plenty I haven't had the opportunity to study and archive. If you're looking to get your old Sphere stuff to a good home, have some unseen material in a closet, or have stories of working with or for these computers, let's talk.
+
+--------------------------------------------------------------------------------
+=== Article 15: Geoutil.com – Measure distances, areas, and convert geo data in the browser ===
+
+Content:
+Welcome to GeoUtil.com
+All-in-one online geography toolkit for working with maps, coordinates, and geographic data!
+All-in-one online geography toolkit for working with maps, coordinates, and geographic data!
+Calculate great-circle distances between any two points on Earth using accurate spherical geometry. Perfect for measuring flight paths, shipping routes, or understanding true distances between locations.
+Visualize distances on an interactive 3D globe with realistic Earth curvature. Rotate, zoom, and see exactly how great-circle routes look in three dimensions.
+Measure the true surface area of any region with spherical accuracy. Draw polygons on the map or upload GeoJSON to calculate areas in square kilometers, square miles, hectares, or acres.
+Calculate the compass bearing (azimuth) between two points on Earth. Essential for navigation, mapping, and understanding directional relationships. Shows both forward and reverse bearings.
+Analyze GeoJSON statistics instantly. See feature counts, geometry types, coordinate counts, total length/area, bounding box, and property coverage — perfect for data validation and quality checks.
+Convert between GeoJSON (human-readable) and TopoJSON (compact, topology-preserving). TopoJSON reduces file sizes by 80% or more while maintaining shared boundaries.
+Convert between GeoJSON and Well-Known Text (WKT) format. Supports standard WKT and EWKT (Extended Well-Known Text) with SRID codes for database compatibility.
+Convert Shapefile (.shp, .shx, .dbf) to web-friendly GeoJSON. Upload the ZIP archive and get a standards-compliant GeoJSON ready for web maps.
+Transform Google Earth KML files into GeoJSON for use in web mapping libraries. Preserves names, descriptions, and styling information.
+Convert CSV spreadsheets with latitude/longitude columns into GeoJSON Point features. Perfect for plotting addresses, locations, or any tabular geographic data.
+Export GeoJSON as vector SVG or raster PNG/JPEG images. Customize colors, sizes, and projections for presentations, reports, or web graphics.
+Transform coordinates between 500+ coordinate reference systems (EPSG codes). Auto-detects source CRS from GeoJSON metadata or coordinate ranges. Convert from WGS84 to Web Mercator, UTM zones, national grids, and more.
+Convert between Decimal Degrees (DD), Degrees Minutes Seconds (DMS), Degrees Decimal Minutes (DDM), UTM, and MGRS formats. Live map preview shows converted locations.
+Extract all coordinates from GeoJSON files as CSV (lat, lon columns). Perfect for debugging, data analysis in Excel/R/Python, or exporting coordinates for other tools.
+Combine multiple GeoJSON files into a single FeatureCollection. Preserves all properties, handles mixed geometry types, and validates data integrity.
+Merge multiple TopoJSON topologies while reconstructing shared arcs and boundaries. Maintains topology efficiency even when combining large datasets.
+Combine multiple JSON files into a single array or object. Merge configuration files, combine data exports, or consolidate API responses — works with any valid JSON.
+Combine multiple Shapefile archives (ZIP) into a single merged Shapefile. Automatically handles schema differences and attribute alignment.
+Split large GeoJSON files by feature properties. Extract one file per country, region, category, or any property value. Download all as a ZIP archive.
+Use cases: Split world data by country, administrative boundaries by level, census data by district
+Split TopoJSON files by object or property while preserving topology. Arc reconstruction ensures each output file maintains valid topology structure.
+Reduce GeoJSON file sizes by 50-80%. Remove whitespace, reduce coordinate precision, strip unnecessary properties, and simplify geometry while maintaining data quality.
+Compress TopoJSON files with advanced quantization, arc simplification, and delta encoding. Achieve 90%+ size reduction for large datasets.
+Remove all whitespace from any JSON file for maximum compression. Works with GeoJSON, TopoJSON, or any JSON data.
+All GeoUtil tools run entirely in your browser using JavaScript. Your data:
+Perfect for working with sensitive geographic data, proprietary datasets, or when you simply want complete privacy.
+Most tools provide live previews so you can verify results before downloading.
+All tools include detailed documentation and examples. Look for:
+Questions or feedback? Visit our Reddit community or check the About page for contact information.
+
+--------------------------------------------------------------------------------
+=== Article 16: Amazon strategised about keeping water use secret ===
+
+Content:
+Company worried higher numbers could damage its reputation
+Amazon strategised about ways to keep the public in the dark over the true extent of its data centres’ water use, a leaked internal document reveals.
+The biggest owner of data centres in the world, Amazon dwarfs competitors Microsoft and Google and is planning a huge increase in capacity as part of a push into artificial intelligence. The Seattle-based company operates hundreds of facilities worldwide, with many more planned despite concerns over how much water is being used to cool them.
+Amazon’s data centres were projected to use 7.7 billion gallons of water a year by 2030, according to the leaked strategy memo, which was circulated within the company in 2022. The $2.4 trillion corporation defends its approach to water usage and has taken steps to improve water efficiency.
+But while Microsoft and Google regularly publish their water consumption, Amazon has never publicly disclosed how much water its giant server farms consume. In the leaked document, Amazon executives warned that transparency was “a one-way door” and advised keeping its projections confidential, even as they feared inviting accusations of a cover-up.
+“Amazon hides its water consumption,” was one hypothetical headline the authors warned of.
+When designing a campaign for water efficiency, Amazon Web Services (AWS), the company’s cloud computing division that oversees its data centres, noted that it would be harder to reach its internal target if its calculations included “secondary” use—water used in generating the electricity to power its data centres, according to the document.
+Instead, Amazon officials opted to use only the relatively smaller figure of primary use, 7.7 billion gallons, when calculating progress towards its target because of “reputational risk”, fearing bad publicity if the full scale of Amazon’s consumption was revealed, the document shows.
+“In environmental science, it is standard practice to include both to more accurately capture the true water cost of data centres,” said Shaolei Ren, associate professor of electrical and computer engineering at the University of California, Riverside.
+Asked about the leaked document, an Amazon spokeswoman, Margaret Callahan, described it as “obsolete” and said it “completely misrepresents Amazon’s current water usage strategy”.
+She said efficiency savings have already been achieved and pointed out that other companies also don’t count secondary water use.
+“A document’s existence doesn’t guarantee its accuracy or finality,” she said. “Meetings often reshape documents or reveal flawed findings or claims.”
+Callahan declined to elaborate on which strategic elements of the document were “obsolete”.
+Water positive
+As US tech companies ride the wave of AI investment and pursue greater heights of computational power, Amazon is building new data centres in some of the world’s driest areas, SourceMaterial and The Guardian revealed in April.
+In November 2022, AWS announced a new sustainability campaign, ‘Water Positive’, with a commitment to “return more water than it uses by 2030”.
+The leaked document, titled ‘AWS Water Positive Public Launch’ and dated one month before the launch, sets out the campaign’s strategy. Its authors noted that any increase in Amazon’s projected water use could bring bad publicity if the company missed its target.
+Using a higher estimate by including secondary use “would double the size and budget” for the campaign “without addressing meaningful operational, regulatory or reputational risks”, they wrote, adding that there was “no focus from customers or media” on water used for electricity.
+“It’s a one-way door”
+As part of the campaign, Amazon planned water efficiency savings to cut its 7.7 billion-gallon primary consumption to 4.9 billion by 2030 without addressing secondary use. In the meantime, secondary data should only be released if governments demand it, the authors wrote.
+“We may decide to release water volumes in the future,” the document said. “But it’s a one-way door and we should only do so if the lack of data undermines the programme or is required by regulators.”
+Callahan said that “like other corporate water positive programs, we focus on our direct water footprint in line with industry best practices to ensure we’re making the most concentrated impact possible.” AWS had cut water use per kilowatt of electricity by 40 per cent since 2021, she said.
+“It would be better if they could own up to it,” said a current Amazon software developer, who asked to remain anonymous for fear of retaliation. “Even if they said it was a low priority, at least that would be honest.”
+Hidden consumption?
+The Water Positive campaign only applies to AWS. The wider Amazon group, including the world’s biggest online retail business, has an overall water consumption that is far higher.
+In 2021, Amazon as a whole used about 105 billion gallons, as much as 958,000 US households, which would make for a city bigger than Houston, Texas, the document reveals.
+“The models referenced in this document were preliminary and unvetted,” said Amazon’s Callahan, who declined to provide any alternative figures.
+“Amazon hides its water consumption”
+The document’s authors advised not to release data about the wider company.
+But they also warned that selective disclosure could lead to accusations of a cover-up. There was “reputational risk of publicly committing to a goal for only a portion of Amazon’s direct water footprint”, they wrote.
+They even suggested negative headlines that might result: “Amazon hides its water consumption behind AWS” and “Amazon disappoints, failing to take full responsibility for water” were among the adverse media stories they hoped to avoid.
+In a sustainability report last month, AWS claimed it had achieved 53 per cent of its Water Positive goal. The division’s plan for reaching the target relies mostly on “water replenishment” projects, some in partnership with Water.org, a non-profit organisation co-founded by actor Matt Damon. The strategy document refers to these projects as “offsets”, describing initiatives like using Amazon computer technology to help utilities prioritise which pipes to fix in order to minimise leaks.
+But of the $109 million AWS planned to spend on offsets, around half would have been spent anyway, either to meet regulatory requirements or because the projects would help AWS operations by making water more available, the document shows. Experts said this amounted to incomplete accounting.
+“Regardless of what sort of offsetting or replenishment you do, it doesn’t necessarily nullify the water footprints of your own operations,” said Tyler Farrow, standards manager at the Alliance for Water Stewardship. “Calling your operations water positive or water neutral is misleading.”
+Amazon’s Callahan said that the “replenishment spending” is voluntary, not a regulatory requirement.
+“We’ve expanded well beyond what was imagined in the document because it’s the right thing to do for the world and for the communities in which we operate,” she said.
+‘Obfuscate the footprint’
+Amazon is also engineering industry standards to downplay its water use and avert scrutiny, said Nathan Wangusi, a former water sustainability manager at the company.
+The corporation has funded efforts by non-profit groups The Nature Conservancy and World Resources Institute, alongside LimnoTech, a consultancy, “to create a globally-accepted methodology for quantifying the benefit of watershed restoration projects”.
+Responding to questions from SourceMaterial, all three organisations defended their integrity and independence and said that Amazon had no undue influence on any methodologies they had created.
+“They spend a lot of time creating methodologies that are used to obfuscate the water footprint,” Wangusi said, referring to Amazon.
+Callahan said these efforts were “standard practice” and that Amazon’s “customers expect us to hold ourselves accountable to credible guidance and best practices”.
+As well as choosing not to disclose water use from electricity generation, Amazon has estimated its larger “indirect” water footprint, the document shows. This extra usage, which falls under a classification known as “scope 3”, includes water for production and construction—in Amazon’s case, mostly irrigation of cotton plantations supplying its fashion brands, and vegetables for its grocery arm, Amazon Fresh.
+Here too, Amazon decided to keep its consumption confidential, even though “indirect water use represents roughly 90 per cent of Amazon’s total water footprint”, according to the document.
+AWS avoided establishing targets for indirect water use because that figure would be “much more significant for the rest of Amazon, especially in the agricultural supply chain, and the team does not want to establish a standard for addressing scope 3 water use that the rest of Amazon would need to follow, given the larger resource implications”, the authors wrote.
+“You don’t need to obscure or obfuscate,” said Wangusi, who believes he was “hounded out” of Amazon for criticising the company’s approach. (Amazon declined to comment on his departure.)
+“It doesn’t make you more profitable,” he said. “It makes you less trustworthy.”
+Headline picture: StockPhotoAstur / Shutterstock.com
+
+--------------------------------------------------------------------------------
+=== Article 17: Should LLMs just treat text content as an image? ===
+
+Content:
+Should LLMs just treat text content as an image?
+Several days ago, DeepSeek released a new OCR paper. OCR, or “optical character recognition”, is the process of converting an image of text - say, a scanned page of a book - into actual text content. Better OCR is obviously relevant to AI because it unlocks more text data to train language models on1. But there’s a more subtle reason why really good OCR might have deep implications for AI models.
+Optical compression
+According to the DeepSeek paper, you can pull out 10 text tokens from a single image token with near-100% accuracy. In other words, a model’s internal representation of an image is ten times as efficient as its internal representation of text. Does this mean that models shouldn’t consume text at all? When I paste a few paragraphs into ChatGPT, would it be more efficient to convert that into an image of text before sending it to the model? Can we supply 10x or 20x more data to a model at inference time by supplying it as an image of text instead of text itself?
+This is called “optical compression”. It reminds me of a funny idea from June of this year to save money on OpenAI transcriptions: before uploading the audio, run it through ffmpeg to speed it up by 2x. The model is smart enough to still pull out the text, and with one simple trick you’ve cut your inference costs and time by half. Optical compression is the same kind of idea: before uploading a big block of text, take a screenshot of it (and optionally downscale the quality) and upload the screenshot instead.
+Some people are already sort-of doing this with existing multimodal LLMs. There’s a company selling this as a service, an open-source project, and even a benchmark. It seems to work okay! Bear in mind that this is not an intended use case for existing models, so it’s plausible that it could get a lot better if AI labs start actually focusing on it.
+The DeepSeek paper suggests an interesting way2 to use tighter optical compression for long-form text contexts. As the context grows, you could decrease the resolution of the oldest images so they’re cheaper to store, but are also literally blurrier. The paper suggests an analogy between this and human memory, where fresh memories are quite vivid but older ones are vaguer and have less detail.
+Why would this work?
+Optical compression is pretty unintuitive to many software engineers. Why on earth would an image of text be expressible in fewer tokens than the text itself?
+In terms of raw information density, an image obviously contains more information than its equivalent text. You can test this for yourself by creating a text file, screenshotting the page, and comparing the size of the image with the size of the text file: the image is about 200x larger. Intuitively, the word “dog” only contains a single word’s worth of information, while an image of the word “dog” contains information about the font, the background and text color, kerning, margins, and so on. How, then, could it be possible that a single image token can contain ten tokens worth of text?
+The first explanation is that text tokens are discrete while image tokens are continuous. Each model has a finite number of text tokens - say, around 50,000. Each of those tokens corresponds to an embedding of, say, 1000 floating-point numbers. Text tokens thus only occupy a scattering of single points in the space of all possible embeddings. By contrast, the embedding of an image token can be sequence of those 1000 numbers. So an image token can be far more expressive than a series of text tokens.
+Another way of looking at the same intuition is that text tokens are a really inefficient way of expressing information. This is often obscured by the fact that text tokens are a reasonably efficient way of sharing information, so long as the sender and receiver both know the list of all possible tokens. When you send a LLM a stream of tokens and it outputs the next one, you’re not passing around slices of a thousand numbers for each token - you’re passing a single integer that represents the token ID. But inside the model this is expanded into a much more inefficient representation (inefficient because it encodes some amount of information about the meaning and use of the token)3. So it’s not that surprising that you could do better than text tokens.
+Zooming out a bit, it’s plausible to me that processing text as images is closer to how the human brain works. To state the obvious, humans don’t consume text as textual content; we consume it as image content (or sometimes as audio). Maybe treating text as a sub-category of image content could unlock ways of processing text that are unavailable when you’re just consuming text content. As a toy example, emoji like :) are easily-understandable as image content but require you to “already know the trick” as text content4.
+Final thoughts
+Of course, AI research is full of ideas that sounds promising but just don’t work that well. It sounds like you should be able to do this trick on current multimodal LLMs - particularly since many people just use them for OCR purposes anyway - but it hasn’t worked well enough to become common practice.
+Could you train a new large language model on text represented as image content? It might be tricky. Training on text tokens is easy - you can simply take a string of text and ask the model to predict the next token. How do you train on an image of text?
+You could break up the image into word chunks and ask the model to generate an image of the next word. But that seems to me like it’d be really slow, and tricky to check if the model was correct or not (e.g. how do you quickly break a file into per-word chunks, how do you match the next word in the image, etc). Alternatively, you could ask the model to output the next word as a token. But then you probably have to train the model on enough tokens so it knows how to manipulate text tokens. At some point you’re just training a normal LLM with no special “text as image” superpowers.
+-
+AI labs are desperate for high-quality text, but only around 30% of written books have been digitized. It’s really hard to find recent data on this, but as a very rough estimate Google Books had ~40M books in 2023, but Google estimates there to have been ~130M books in 2010. That comes out to 30%.
+↩ -
+See Figure 13.
+↩ -
+Not to skip too far ahead, but this is one reason to think that representing a block of text tokens in a single image might not be such a great idea.
+↩ -
+Of course current LLMs can interpret these emojis. Less-toy examples: image-based LLMs might have a better feel for paragraph breaks and headings, might be better able to take a big picture view of a single page of text, and might find it easier to “skip through” large documents by skimming the start of each paragraph. Or they might not! We won’t know until somebody tries.
+↩
+If you liked this post, consider subscribing to email updates about my new posts, or sharing it on Hacker News.
+October 21, 2025 │ Tags: ai
+
+--------------------------------------------------------------------------------
+=== Article 18: Corrosion ===
+
+Content:
+Fly.io transmogrifies Docker containers into Fly Machines: micro-VMs running on our own hardware all over the world. The hardest part of running this platform isn’t managing the servers, and it isn’t operating the network; it’s gluing those two things together.
+Several times a second, as customer CI/CD pipelines tear up or bring down Fly Machines, our state synchronization system blasts updates across our internal mesh, so that edge proxies from Tokyo to Amsterdam can keep the accurate routing table that allows them to route requests for applications to the nearest customer instances.
+On September 1, 2024, at 3:30PM EST, a new Fly Machine came up with a new “virtual service” configuration option a developer had just shipped. Within a few seconds every proxy in our fleet had locked up hard. It was the worst outage we’ve experienced: a period during which no end-user requests could reach our customer apps at all.
+Distributed systems are blast amplifiers. By propagating data across a network, they also propagate bugs in the systems that depend on that data. In the case of Corrosion, our state distribution system, those bugs propagate quickly. The proxy code that handled that Corrosion update had succumbed to a notorious Rust concurrency footgun: an if let
+expression over an RWLock
+assumed (reasonably, but incorrectly) in its else
+branch that the lock had been released. Instant and virulently contagious deadlock.
+A lesson we’ve learned the hard way: never trust a distributed system without an interesting failure story. If a distributed system hasn’t ruined a weekend or kept you up overnight, you don’t understand it yet. Which is why that’s how we’re introducing Corrosion, an unconventional service discovery system we built for our platform and open sourced.
+Our Face-Seeking Rake
+State synchronization is the hardest problem in running a platform like ours. So why build a risky new distributed system for it? Because no matter what we try, that rake is waiting for our foot. The reason is our orchestration model.
+Virtually every mainstream orchestration system (including Kubernetes) relies on a centralized database to make decisions about where to place new workloads. Individual servers keep track of what they’re running, but that central database is the source of truth. At Fly.io, in order to scale across dozens of regions globally, we flip that notion on its head: individual servers are the source of truth for their workloads.
+In our platform, our central API bids out work to what is in effect a global market of competing “worker” physical servers. By moving the authoritative source of information from a central scheduler to individual servers, we scale out without bottlenecking on a database that demands both responsiveness and consistency between São Paulo, Virginia, and Sydney.
+The bidding model is elegant, but it’s insufficient to route network requests. To allow an HTTP request in Tokyo to find the nearest instance in Sydney, we really do need some kind of global map of every app we host.
+For longer than we should have, we relied on HashiCorp Consul to route traffic. Consul is fantastic software. Don’t build a global routing system on it. Then we built SQLite caches of Consul. SQLite: also fantastic. But don’t do this either.
+Like an unattended turkey deep frying on the patio, truly global distributed consensus promises deliciousness while yielding only immolation. Consensus protocols like Raft break down over long distances. And they work against the architecture of our platform: our Consul cluster, running on the biggest iron we could buy, wasted time guaranteeing consensus for updates that couldn’t conflict in the first place.
+Corrosion
+To build a global routing database, we moved away from distributed consensus and took cues from actual routing protocols.
+A protocol like OSPF has the same operating model and many of the same constraints we do. OSPF is a “link-state routing protocol”, which, conveniently for us, means that routers are sources of truth for their own links and responsible for quickly communicating changes to every other router, so the network can make forwarding decisions.
+We have things easier than OSPF does. Its flooding algorithm can’t assume connectivity between arbitrary routers (solving that problem is the point of OSPF). But we run a global, fully connected WireGuard mesh between our servers. All we need to do is gossip efficiently.
+Corrosion is a Rust program that propagates a SQLite database with a gossip protocol.
+Like Consul, our gossip protocol is built on SWIM. Start with the simplest, dumbest group membership protocol you can imagine: every node spams every node it learns about with heartbeats. Now, just two tweaks: first, each step of the protocol, spam a random subset of nodes, not the whole set. Then, instead of freaking out when a heartbeat fails, mark it “suspect” and ask another random subset of neighbors to ping it for you. SWIM converges on global membership very quickly.
+Once membership worked out, we run QUIC between nodes in the cluster to broadcast changes and reconcile state for new nodes.
+Corrosion looks like a globally synchronized database. You can open it with SQLite and just read things out of its tables. What makes it interesting is what it doesn’t do: no locking, no central servers, and no distributed consensus. Instead, we exploit our orchestration model: workers own their own state, so updates from different workers almost never conflict.
+We do impose some order. Every node in a Corrosion cluster will eventually receive the same set of updates, in some order. To ensure every instance arrives at the same “working set” picture, we use cr-sqlite, the CRDT SQLite extension.
+cr-sqlite works by marking specified SQLite tables as CRDT-managed. For these table, changes to any column of a row are logged in a special crsql_changes
+table. Updates to tables are applied last-write-wins using logical timestamps (that is, causal ordering rather than wall-clock ordering). You can read much more about how that works here.
+As rows are updated in Corrosion’s ordinary SQL tables, the resulting changes are collected from crsql_changes
+. They’re bundled into batched update packets and gossiped.
+When things are going smoothly, Corrosion is easy to reason about. Many customers of Corrosion’s data don’t even need to know it exists, just where the database is. We don’t fret over “leader elections” or bite our nails watching metrics for update backlogs. And it’s fast as all get-out.
+Shit Happens
+This is a story about how we made one good set of engineering decisions and never experienced any problems. Please clap.
+We told you already about the worst problem Corrosion was involved with: efficiently gossiping a deadlock bug to every proxy in our fleet, shutting our whole network down. Really, Corrosion was just a bystander for that outage. But it perpetrated others.
+Take a classic ops problem: the unexpectedly expensive DDL change. You wrote a simple migration, tested it, merged it to main, and went to bed, wrongly assuming the migration wouldn’t cause an outage when it ran in prod. Happens to the best of us.
+Now spice it up. You made a trivial-seeming schema change to a CRDT table hooked up to a global gossip system. Now, when the deploy runs, thousands of high-powered servers around the world join a chorus of database reconciliation messages that melts down the entire cluster.
+That happened to us last year when a team member added a nullable column to a Corrosion table. New nullable columns are kryptonite to large Corrosion tables: cr-sqlite
+needs to backfill values for every row in the table. It played out as if every Fly Machine on our platform had suddenly changed state simultaneously, just to fuck us.
+Gnarlier war story: for a long time we ran both Corrosion and Consul, because two distributed systems means twice the resiliency. One morning, a Consul mTLS certificate expired. Every worker in our fleet severed its connection to Consul.
+We should have been fine. We had Corrosion running. Except: under the hood, every worker in the fleet is doing a backoff loop trying to reestablish connectivity to Consul. Each of those attempts re-invokes a code path to update Fly Machine state. That code path incurs a Corrosion write.
+By the time we’ve figured out what the hell is happening, we’re literally saturating our uplinks almost everywhere in our fleet. We apologize to our uplink providers.
+It’s been a long time since anything like this has happened at Fly.io, but preventing the next one is basically all we think about anymore.
+Iteration
+In retrospect, our Corrosion rollout repeated a mistake we made with Consul: we built a single global state domain. Nothing about Corrosion’s design required us to do this, and we’re unwinding that decision now. Hold that thought. We got some big payoffs from some smaller lifts.
+First, and most importantly, we watchdogged everything. We showed you a contagious deadlock bug, lethal because our risk model was missing “these Tokio programs might deadlock”. Not anymore. Our Tokio programs all have built-in watchdogs; an event-loop stall will bounce the service and make a king-hell alerting racket. Watchdogs have cancelled multiple outages. Minimal code, easy win. Do this in your own systems.
+Then, we extensively tested Corrosion itself. We’ve written about a bug we found in the Rust parking_lot
+library. We spent months looking for similar bugs with Antithesis. Again: do recommend. It retraced our steps on the parking_lot
+bug easily; the bug wouldn’t have been worth the blog post if we’d been using Antithesis at the time. Multiverse debugging is killer for distributed systems.
+No amount of testing will make us trust a distributed system. So we’ve made it simpler to rebuild Corrosion’s database from our workers. We keep checkpoint backups of the Corrosion database on object storage. That was smart of us. When shit truly went haywire last year, we had the option to reboot the cluster, which is ultimately what we did. That eats some time (the database is large and propagating is expensive), but diagnosing and repairing distributed systems mishaps takes even longer.
+We’ve also improved the way our workers feed Corrosion. Until recently, any time a worker updated its local database, we published the same incremental update to Corrosion. But now we’ve eliminated partial updates. Instead, when a Fly Machine changes, we re-publish the entire data set for the Machine. Because of how Corrosion resolves changes to its own rows, the node receiving the re-published Fly Machine automatically filters out the no-op changes before gossiping them. Eliminating partial updates forecloses a bunch of bugs (and, we think, kills off a couple sneaky ones we’ve been chasing). We should have done it this way to begin with.
+Finally, let’s revisit that global state problem. After the contagious deadlock bug, we concluded we need to evolve past a single cluster. So we took on a project we call “regionalization”, which creates a two-level database scheme. Each region we operate in runs a Corrosion cluster with fine-grained data about every Fly Machine in the region. The global cluster then maps applications to regions, which is sufficient to make forwarding decisions at our edge proxies.
+Regionalization reduces the blast radius of state bugs. Most things we track don’t have to matter outside their region (importantly, most of the code changes to what we track are also region-local). We can roll out changes to this kind of code in ways that, worst case, threaten only a single region.
+The New System Works
+Most distributed systems have state synchronization challenges. Corrosion has a different “shape” than most of those systems:
+- It doesn’t rely on distributed consensus, like Consul, Zookeeper, Etcd, Raft, or rqlite (which we came very close to using).
+- It doesn’t rely on a large-scale centralized data store, like FoundationDB or databases backed by S3-style object storage.
+- It’s nevertheless highly distributed (each of thousands of workers run nodes), converges quickly (in seconds), and presents as a simple SQLite database. Neat!
+It wasn’t easy getting here. Corrosion is a large part of what every engineer at Fly.io who writes Rust works on.
+Part of what’s making Corrosion work is that we’re careful about what we put into it. Not every piece of state we manage needs gossip propagation. tkdb
+, the backend for our Macaroon tokens, is a much simpler SQLite service backed by Litestream. So is Pet Sematary, the secret store we built to replace HashiCorp Vault.
+Still, there are probably lots of distributed state problems that want something more like a link-state routing protocol and less like a distributed database. If you think you might have one of those, feel free to take Corrosion for a spin.
+Corrosion is Jérôme Gravel-Niquet’s brainchild. For the last couple years, much of the iteration on it was led by Somtochi Onyekwere and Peter Cai. The work was alternately cortisol- and endorphin-inducing. We’re glad to finally get to talk about it in detail.
+
+--------------------------------------------------------------------------------
+=== Article 19: Structure and Interpretation of Classical Mechanics (2014) ===
+
+Content:
+©2014 by The Massachusetts Institute of Technology
+This work is licensed under a Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License (CC BY-SA 3.0). Based on a work at mitpress.mit.edu.
+The MIT Press
+Cambridge, Massachusetts
+London, England
+Title page image credit: Wellcome Library, London. Licensed under a Creative Commons Attribution only license (CC BY 4.0).
+
+--------------------------------------------------------------------------------
+=== Article 20: Unexpected patterns in historical astronomical observations ===
+
+Content:
+Unexpected patterns in historical astronomical observations
+Researchers at Nordita at Stockholm University have analyzed flashes of light on astronomical plates from the early 1950s and found statistical connections between the times of these flashes, nuclear weapons tests and reports of unidentified anomalous phenomena (UAP). The results are presented in two studies published in Scientific Reports and Publications of the Astronomical Society of the Pacific.
+Researchers at Nordita, Stockholm University, together with international colleagues at Vanderbilt University, have published two new studies that show that historical astronomical observations contain unexpected patterns. The results are based on short-lived flashes of light captured on photographic plates from the early 1950s within the VASCO project (Vanishing & Appearing Sources during a Century of Observations). The project analyzes digitized astronomical plates to identify sources that blink, disappear or suddenly appear – and in this way better understand both natural and previously unexplained phenomena.
+“Today we know that short flashes of light are often solar reflections from flat, highly reflective objects in orbit around the Earth, such as satellites and space debris. But the photographic plates analyzed in VASCO were taken before humans had satellites in space,” says Beatriz Villarroel, a researcher at Nordita at Stockholm University.
+The first article, published in Scientific Reports (Nature Portfolio), analyzes over 106,000 flashes of light, or transients, that look like stars appearing and disappearing within a single exposure. The study shows statistical connections between the phenomena, reports of UAP, and atmospheric nuclear weapons tests during the 1950s. The flashes were 68 percent more likely to occur the day after a nuclear weapons test than on days without. In addition, the number of flashes increases by an average of 8.5 percent for each report of UAP. When both these reports and nuclear tests coincided, the effects were additive, with more than twice as many flashes of light as on days without either nuclear tests or reports.
+“The magnitude of the association between these flashes of light and nuclear tests was surprising, as was the very specific time at which they most often occurred—namely, the day after a test. What they might represent is a very fascinating question that needs further investigation,” says Stephen Bruehl of Vanderbilt University.
+The second paper, published in Publications of the Astronomical Society of the Pacific (PASP), specifically looks for signs of possible extraterrestrial artifacts in orbit around Earth, before the first human satellite launch in 1957. The researchers looked, among other things, for instances where multiple flashes of light were along a line or in a narrow band—something that indicates reflections from flat, reflective objects in motion. Two interesting examples were identified, one of which occurred on July 27, 1952, the same night as the notable sightings of UAP in Washington, D.C.
+The same article tests a method that the research team recently published in the Monthly Notices of the Royal Astronomical Society (MNRAS): comparing how often the phenomena occur in the Earth's shadow, where solar reflections cannot occur. The new article in PASP, which again studies more than 106,000 transients seen across the northern starry sky, shows a clear deficit of flashes of light in the Earth's shadow, with one-third missing, suggesting that at least one-third of the phenomena were caused by solar reflections from highly reflective objects in high orbits.
+For a long time, single points of light on astronomical plates have been dismissed as defects, even when they looked like real stars. The new studies show that some of these phenomena are actually real objects and exhibit patterns that cannot be explained by chance or image noise.
+“Amidst what has been perceived as noise on the plates, there seems to be a genuine population of phenomena that correlate with, among other things, nuclear weapons tests or reports of UAP and that are missing in the Earth's shadow. You don't get that kind of solar reflections from round objects like asteroids or dust grains in space, which leave streaks during a 50-minute exposure, but only if something is very flat and very reflective and reflects the sunlight with a short flash,” says Beatriz Villarroel.
+The researchers suggest that the results are unexpected and indicate that some of the small dots on the plates may be due to reflections from physical objects in high orbit around the Earth.
+The study in Scientific Raports: https://www.nature.com/articles/s41598-025-21620-3
+The study in Publications of the Astronomical Society of the Pacific: https://iopscience.iop.org/article/10.1088/1538-3873/ae0afe
+Last updated: October 20, 2025
+Source: The Communications Office
+
+--------------------------------------------------------------------------------
+=== Article 21: Enchanting Imposters ===
+
+Content:
+In “The History of Fake News From the Flood to the Apocalypse,” the course Earle Havens teaches at Johns Hopkins University, he presents undergrads with a formidable challenge. They have to create historical forgeries and then defend the authenticity of their deceptions.
+Forgeries, hoaxes, and other types of literary fakery have preoccupied Havens, a rare books and manuscripts curator at the university’s Stern Center for the History of the Book, for many years now. As part of his curatorial brief, Havens oversees the Bibliotheca Fictiva Collection of Literary and Historical Forgery, available via JSTOR. It includes more than 2,000 items—rare books, manuscripts, and ephemera—and was the brainchild of Arthur and Janet Freeman, who amassed most of its holdings over a period of some fifty years. Johns Hopkins acquired the majority of the collection from the Freemans in 2011; it has continued to expand in the years since.
+Havens spoke with JSTOR Daily about what he finds so thoroughly bewitching about the grand, long tradition of literary forgery.
+JSTOR Daily: What is the Bibliotheca Fictiva collection?
+Earle Havens: It’s a rare book collection that chronicles the history of literary forgery, including historical as well as imaginative literature, beginning with Old Testament pseudepigrapha and apocrypha all the way up to the middle of the twentieth century. We’ve likely been lying to each other ever since we learned how to speak. It includes physical forgeries, like medieval charters that were forged in the Middle Ages. We also have a “medieval” charter actually forged in the nineteenth century. We also have hundreds of texts that help to reveal and demolish forgeries across the millennia—documenting many of the people who wrote against things that they thought were not correct.
+We have faked historical bindings, fake manuscripts, and fake letters by famous people like the Protestant Reformer Martin Luther. We have books about impostors from the Middle Ages to the modern era as well as hoaxes and archaeological forgeries. We don’t do art forgery—that’s another world—but we do have a couple of painted bindings that are forged. We have a few examples of the otherwise mysterious “Spanish forger,” who was probably actually French and active around 1900, forging medieval illuminations on actual medieval vellum and wood panels.
+Ours is the biggest collection in the world by a country mile on this subject, and it’s brilliant because it gets at the heart of what we do in the university every day: Get people to ask hard questions about everything and not to trust anything on its face.
+When I first taught my graduate seminar on this, one of my students said, “Oh no, I can’t trust anything I read anymore,” and I replied, “Mission accomplished!”
+This collection owes its existence to Arthur and Janet Freeman. What can you tell us about them?
+Arthur was originally a scholar of the Elizabethan drama—a professor at Boston University for a number of years before moving to London and working for Quaritch, one of the oldest bookseller firms in the world focusing on antiquarian books. He started collecting for himself—starting with a Shakespeare forgery—and then just kept going until his death earlier this year.
+The collection’s page on the Johns Hopkins website states that the Freemans set limits on what they would include, but their parameters seem so vast as to be meaningless.
+Forgery is a really complicated, even internecine, phenomenon. The ancient Romans and Greeks never really wrote treatises about how to lie well. There are no canons of forgery in Quintilian’s Institutes or Cicero. It was considered immoral to lie and the whole point of writing things down back then was to increase morality and improve society, so there really is no didactic history of forgery. But over time, if you study it as I do—from ancient Aztec aliens invented in the 1960s, to historical anachronisms, fake genealogies—it’s sort of everywhere and kind of endless.
+There was a debate about whether Robinson Crusoe should be in the collection because on the title page it says, “written by himself.” But it wasn’t written by Robinson Crusoe—it’s a literary imposture. It belongs in the Bibliotheca Fictiva because it was an imposture by its own author, Daniel Defoe.
+What about travel stories where somebody makes a satire of a society like Gulliver’s Travels? Well, Gulliver’s Travels is pure fiction; it doesn’t have to say that it’s real. But Baron Munchausen is in the collection because he was loosely based on a real person, and his ridiculous adventures were presented as if they were autobiographical rather than the fiction of Rudolph Erich Raspe. This handful of examples barely scratch the surface, however, but perhaps they are helpful.
+How do you introduce students to this topic?
+People think that this fake news phenomenon is a sui generis invention of the digital age. It’s not, and many of the tropes and forms and ways in which people attempt to deceive one another or misinform were the same in the premodern and early modern worlds as they are today. In order to teach that continuum, I break up the course I teach around it chronologically, through different, but distinctive, periods in history. Over time the students begin to see patterns. Early in the semester I send them to the Wikipedia page detailing nearly 100 kinds of human biases and pathologies that go into concocting, and in many cases believing in, “fake news.” If you go through the list, you can plop different forgeries from the collection into in almost every category there. Forgery is also about persuasion, and certain forgeries have specific attributes. Hoaxes, for example, very often capitalize on the recent appearance of new technologies of observation and communication, but they also need to be popular to succeed, otherwise they don’t do what they’re supposed to do, duping the masses.
+At least for now, my students can’t use AI to help them write their papers because AI hasn’t been designed to generate fake stuff or how to defend it, as my students must do over the course of the semester. I started asking ChatGPT about great forgeries, and it barely knew any of them because of the nature of the large language models that are being generated. This will surely change, but it’s telling for now.
+Their first assignment is to write a fake letter from the ancient world, and it has to be plausible; these two interlocutors might have already have real letters between them that survive, and then students just interpolate a “lost” letter that has only now been rediscovered. Then they’re required to defend the forgery. They have to describe the physical artifact, where it is, and where it was found. If they mention the work of “experts,” I ask who? Where? If they say imaging was done to try to date the artifact, I ask them: with which technology specifically? They have to keep elaborating until they’ve persuaded me that their concoctions, if not probable, could at least be somewhat plausible.
+I help them find that spot where they create a willing suspension of disbelief, and they learn how to lie about a lie. That actually helps them get to the truth in really powerful ways, sort of like discovering muscles they didn’t know they had. It makes them “media literate” in so many ways that they had not really thought about before in many cases.
+This collection is arguably an acknowledgment of the merits of fakery. When I think of recent literary hoaxes—James Frey’s memoir comes to mind—the reaction was outrage. People felt defrauded. Why do we delight in some embodiments of forgeries, and even sometimes pay for them, while other times we ostracize the forger?
+We often have an assumption that we’re owed the truth, and that we should be seeking it, although that’s not quite as firm a thing as it used to be in the world in which we select our facts and our news feeds. The virtue of this collection is that it puts media literacy at the center—teaching how to detect clues that should cause you, or even compel you, to be more skeptical and more critical of everything you encounter, no matter how “authoritative” seeming the source.
+If you’re asking what’s the point of a collection like this? Well, it’s a record of fabulous scholarship. Most successful forgers were smart and creative people, and many of their forgeries were consummate, even ingenious. There’s also an economy to forgery, like you want to give the reader enough to suspend their disbelief, but not any more than that because you can hang yourself by your own petard, as it were, with too much information. And often, that was exactly how forgeries were eventually demolished.
+There’s no manual on how to invent forgeries. Take Bata Kindai Amgoza ibn LoBagola, who pretended to be this African native descended from the Lost Tribe of Israel but was actually born in Baltimore in the Jim Crow South. He tried to escape poverty and racism by inventing a whole other persona of an African from the bush who comes off as strangely wise and exotic, concocting all sorts of pithy Yoda-like sayings. Knopf published his autobiography. He was on the lecture circuit in New York City and elsewhere. I almost feel like he was exacting a kind of elaborate revenge against racial discrimination in America. I suppose there’s a kind of perverse justice to the whole episode on some level.
+More to Explore
+From Oriental Riviera to Global Asia: Hong Kong in Travel Posters
+But the Bibliotheca Fictiva is also a record of how throughout history, none of these things stood the test of time. As we develop scholarly skills—whether it be paleography or diplomatics, that is, the study of manuscript forms and how you can figure out whether things are anachronistic or not, to other kinds of methods of forensic scholarship, like philological analysis and the collation of texts—forgeries are usually found out.
+The most famous is probably the Donation of Constantine. There’s a fresco of this in the Vatican Palace depicting as a real event something that was entirely rooted in a medieval forgery “documenting” Emperor Constantine’s decision to hand over Rome, and indeed all of Europe, to the pope, granting him supremacy over the new capital of Constantinople. That later became the foundational precedent for centuries of papal claims to secular authority over the papal states of the Romagna.
+Lorenzo Valla, a brilliant scholar of the mid-fifteenth century, totally destroyed and demolished the text of the Donation on every conceivable level. Ultimately, though, he proved that it was a fake because it deployed words that didn’t exist at the time that it claimed to have been written. That’s how a lot of forgery demolitions get worked out.
+I understand why people now try to push fake news—maybe they’re trying to get people to join their political side, or they’re profit driven. What would be the reason to forge Dead Sea Scrolls or create the apocryphal Book of Judith.
+Well, very few female voices are heard in the Bible, particularly in the New Testament. And a lot of the pseudepigrapha, like the fake gospels and fake apocalypses, fill in gaps in the record that can serve latter-day, post-biblical purposes. One I love, the Gnostic Apocalypse of Adam, tells what happened to Adam and Eve after they were expelled from the Garden of Eden and offers up theological interpretations that promote the Gnostic faith tradition in ways the Book of Genesis did not.
+Fan fiction.
+This always floors people: the Bible doesn’t actually tell us what Jesus Christ looked like. At all. But there have literally been billions of people over the past two millennia who would have liked to know this. So, in the Middle Ages, somebody decided to fix that, and they wrote the Letter of Publius Lentulus, a fake epistle supposedly written by a Roman in Palestine who was an eyewitness to Jesus’s activities. He ostensibly wrote to the Senate in Rome describing Jesus as having chestnut hair, smooth at the top and curly down to his shoulders, with gray eyes and no blemishes. That’s preserved in over 300 medieval and Renaissance manuscript witnesses and has served as the basis of untold thousands of visual representations of Jesus Christ.
+Or the so-called “Letter from Heaven.” At some point following the Christian revelation in the New Testament the decision was taken in heaven to change the day of the Sabbath from the Jewish Saturday to the Christian Sunday.
+So, the letter is sent down to earth sixty-three years after Christ’s crucifixion and placed under a large rock in the holy land with an inscription on top: “Blessed is he that shall turn me over.” People saw this strange-looking rock and tried to pick it up, but none could until this innocent little boy succeeded, delivering it to authorities. In the letter itself, Jesus has given the proviso that “he who copyeth this letter shall be blessed,” but “he that that destroyeth this letter will be cursed.” It’s possibly the first chain letter in history, thought to date originally to the sixth century. We have broadsides of the Letter printed in the late eighteenth century in the collection!
+Besides religion, what are other possible reasons a person might have executed a forgery?
+In the earlier periods, a lot of it is what I call “patriotic mythology.” For example, the Italians expressed anxiety during the Renaissance, following the revival of Greco-Roman culture, that they came long after the Greeks, and there’s this idea that the one who came first is always the most important, the most influential and authoritative culture. So the Dominican Annius of Viterbo decided to “discover” a sequence of previously lost ancient texts written by a Babylonian, a Jew, a Christian, a Roman, an Egyptian, and all these others, around which Annius wrote ingenious commentaries. Of course, he forged all of it, mostly with the aim of demonstrating that the ancient Egyptian god Osiris ultimately resettled in Viterbo, Italy, which then became the epicenter of all human culture, not to mention Annius’s own hometown.
+He planted fake hieroglyphs in the dirt and then staged excavations digging them up to prove that the Italians are really possessed of the most ancient lineage, while those mendacious Greeks who thought they invented everything were actually latest to the table in shaping human civilization. The French soon got into the act by inventing the so-called Dijon Druids, who apparently had access to ancient Greek culture long before the Romans were ever even a thing, giving them an impossibly early pedigree as well. The Gauls had been described as barbarians by Julius Caesar and Livy, but now had become these Ur people, far more ancient and civilized than their ancient Roman detractors. And then the English joined in, claiming that Joseph of Arimathea brought the holy grail containing the blood and sweat of the crucified Christ to Glastonbury. Even the Swedes go in on the game. We have a facsimile of an unfortunately “lost” Runic manuscript describing how one figure left ancient Sweden to go to Greece to study with Pythagoras, returning home with the wisdom of the Greek laws.
+The era of pecuniary forgery is yet another distinctive phenomenon in the history of forgery, mostly occurring during the period of “bibliomania” in the nineteenth century, a time when more and more wealthy people in Europe and in the United States began to value and seek to acquire impossible rarities in the form of rare books and manuscripts; they pined for, among other things, books from Shakespeare’s personal library bearing his “autograph” annotations, no less.
+Skilled forgers started to catch on, endeavoring to cash in on that development. Nearly every duke and earl and baron in England was competing to build great rare book collections, and lots and lots of fake manuscripts emerged. Americans are super patriotic collectors of their own history, so it should come at no surprise, for example, that one of the most forged signatures in American history is George Washington’s. He slept everywhere, right?
+It’s fascinating. A fake document can be as illuminating as an authentic one depending on where we are in a particular historical moment.
+Right, like we read imaginative literature because it’s a creative expression of an author at a certain time in history. Shakespeare set numerous plays in ancient Rome, but he makes his characters Elizabethans, using Elizabethan language. If you stop judging forgeries as immoral tissues of lies, you can begin to learn what people tried to lie about at different times and how, and for what specific audiences—then forgery can emerge as extremely illuminating.
+Is there a link between literary forgery and art forgery?
+Art forgery’s difficult. On one level its assessment can be quite subjective, and there’s a degree of connoisseurship. Where does attribution end? How firm do you need something to be to firmly attribute a painting to Peter Paul Rubens or to his studio?
+We do spectroscopy and carbon dating for certain things. We know that the Vinland Map at Yale is not a pre-Columbian map of America. It was forged probably in the twentieth century because the ink has material in it that didn’t exist before the testing of the atomic bomb.
+But the technology to detect that when Paul Mellon bought it in the middle of the twentieth century to give to the Beinecke Library at Yale didn’t exist yet.
+The forensic study of art forgery is way more advanced than that of literary forgery because the stakes are also often much higher, particularly when you are talking about Old Master paintings worth hundreds of thousands, even millions, of dollars.
+Another aspect of literary forgery is that it’s ludic, which is the Latin word for something “playful.” Because forgery requires imagination and creativity, yes, it may seem at times fringe, but it’s nevertheless somewhat ingenious, even inspiring on some level.
+There’s a performative aspect to all of it, and we can laugh about this stuff now, but you know, there are and were people who actually believed some of these forgeries were quite true and a distinctive part of the historical record.
+If people want to read more about this, what books do you recommend?
+We’ve all lied at some point in our lives about something, whether it’s a white lie or something worse. And so we’re all part of this culture, but scholars until very recently often didn’t want to have anything to do with the story of forgery because it was immoral and sometimes a bit icky—I don’t want people to think I’m interested in lying. But one scholar, Anthony Grafton, who about thirty years ago published Forgers and Critics, focused on how in the early modern period, there was this enormous flourishing not only of culture but also of liars. And he documented a lot of it in one place for the first time.
+I published a catalog that you can order online called Fakes, Lies, and Forgeries, and it’s essentially an exhibition catalog of the collection. You can order it online.
+What are among the most popular items in the collection?
+We have an ancient Greek manuscript that was written by Constantine Simonides in the nineteenth century revealing the lost secrets of Greek painting in late antiquity. It was bought by the most famous collector of the era of bibliomania, Sir Thomas Phillips. He later wrote on the first page that he bought it knowing it was fake…but who’s to say?
+We have Curzio Inghirami’s illustrated facsimiles of all of the scariths, little time capsules made of wax and bitumen that he planted all over his estate in Volterra in the middle of the seventeenth century and then “discovered” with his friends. They revealed ancient Etruscan manuscripts that predicted the coming of Christ even before his birth, elevating the ancient Volterrans as actually having been granted prescience of the Christian revelation. It’s a fabulously illustrated book whose title page says nothing that’s actually true (it even claims to have been printed in Frankfurt, rather than Italy, and uses a fake printer’s device). Roundly condemned as an archaeological hoax by scholars, Inghirami undertook to publish a 1,000-page defense of his forgery. My friend and colleague Ingrid Rowland has written a wonderful book about that called The Scarith of Scoronello; it’s worth reading. Some of the autograph forgeries, you know, like Major Byron, are very popular as well because people just can’t believe how many there are. Specializing in forging the handwriting of Lord Byron, Major Byron was among the most prolific autograph forgers of the nineteenth century.
+If you start Googling impostors, you’re going find hundreds of them throughout history, but mostly from the nineteenth and twentieth centuries. I also recommend you have a look at the Museum of Hoaxes online, it’s really a scream. You know that line from Sir Walter Scott, “Oh, what a tangled web we weave when first we practice to deceive.” A tangled web indeed!
+Support JSTOR Daily! Join our membership program on Patreon today.
+
+--------------------------------------------------------------------------------
+=== Article 22: Microsoft in court for allegedly misleading Australians over 365 subscriptions ===
+
+Content:
+The ACCC has commenced proceedings in the Federal Court against Microsoft Australia and its parent company Microsoft Corporation for allegedly misleading approximately 2.7 million Australian customers when communicating subscription options and price increases, after it integrated its AI assistant, Copilot, into Microsoft 365 plans.
+The ACCC alleges that since 31 October 2024, Microsoft has told subscribers of Microsoft 365 Personal and Family plans with auto-renewal enabled that to maintain their subscription they must accept the integration of Copilot and pay higher prices for their plan, or, alternatively, cancel their subscription.
+The ACCC alleges this information provided to subscribers was false or misleading because there was an undisclosed third option, the Microsoft 365 Personal or Family Classic plans, which allowed subscribers to retain the features of their existing plan, without Copilot, at the previous lower price.
+Microsoft’s communication with subscribers did not refer to the existence of the “Classic” plans, and the only way subscribers could access them was to begin the process of cancelling their subscription. This involved navigating to the subscriptions section of their Microsoft account and selecting “Cancel subscription”. It was only on the following page that subscribers were given the option to instead move to the Classic plan. See a screenshot of the cancellation page revealing the Classic plan.
+“Following a detailed investigation, we will allege in Court that Microsoft deliberately omitted reference to the Classic plans in its communications and concealed their existence until after subscribers initiated the cancellation process to increase the number of consumers on more expensive Copilot-integrated plans,” ACCC Chair Gina Cass-Gottlieb said.
+“The Microsoft Office apps included in 365 subscriptions are essential in many people’s lives and given there are limited substitutes to the bundled package, cancelling the subscription is a decision many would not make lightly.”
+“We’re concerned that Microsoft’s communications denied its customers the opportunity to make informed decisions about their subscription options, which included the possibility of retaining all the features of their existing plan without Copilot and at the lower price,” Ms Cass-Gottlieb said.
+“We believe many Microsoft 365 customers would have opted for the Classic plan had they been aware of all the available options.”
+Following the integration of Copilot, the annual subscription price of the Microsoft 365 Personal plan increased by 45 per cent from $109 to $159. The annual subscription price for the Microsoft 365 Family plan increased by 29 per cent from $139 to $179.
+Microsoft sent two emails and published a blog post to inform auto-renewing subscribers (as of 31 October 2024) about the Copilot integration and the impending price increase that would apply at their next renewal. These three pieces of communication are central to the ACCC’s case.
+“We allege that Microsoft’s two emails to existing subscribers and the blog post were false or misleading as they conveyed that consumers had to accept the more expensive Copilot-integrated plans, and that the only other option was to cancel,” Ms Cass-Gottlieb said.
+“All businesses need to provide accurate information about their services and prices. Failure to do so risks breaching the Australian Consumer Law,” Ms Cass-Gottlieb said.
+In establishing its investigation into this matter, the ACCC drew on a significant number of consumer reports, as well as commentary in online forums such as Reddit. Information provided by consumers to the ACCC’s Infocentre was critical to alerting the ACCC to the alleged conduct, particularly in identifying the availability of the Classic plan through subscribers’ cancellation flows.
+The ACCC is seeking orders including penalties, injunctions, declarations, consumer redress, and costs.
+Consumer response
+The ACCC believes the millions of Australian consumers who were allegedly misled by Microsoft about the availability of the Classic plan may have suffered economic harm through the automatic renewal of their subscription with Copilot integration at a higher price.
+The ACCC is seeking consumer redress in this case for Microsoft 365 Personal and Family subscribers affected by the alleged conduct.
+Existing Microsoft 365 Personal and Family subscribers who have not had their subscription renewed since 8 July 2025 and would like to revert to their previous plan may be able to select the cancel option and follow the steps in the cancellation process until the Classic plan is offered. However, the ACCC notes that the subscription options and prices offered are entirely in Microsoft’s control and could be subject to change at any time.
+Example timeline for a subscriber on a Microsoft 365 Personal plan
+- On 19 April 2024, a consumer purchased an annual Microsoft 365 Personal subscription for $109 and enabled auto-renewal for one year’s time.
+- On 31 October 2024, Microsoft published a blog post in which it stated:
+- “To reflect the value we’ve added over the past decade and enable us to deliver new innovations for years to come, we’re increasing the prices of Microsoft 365 Personal and Family. The price increase will apply to existing subscribers upon their next renewal.”
+- On 9 January 2025, the consumer received an email informing them that AI features were being added to their plan and the price of the annual subscription would increase from $109 to $159 starting on 19 April 2025. See a screenshot of the first email sent to the consumers about the price increase.
+- On 13 April 2025, 7 days before their renewal date, the consumer received a second email in which Microsoft stated:
+- “We want to let you know about a change to the amount of your next payment. Unless you cancel two days before Saturday, April 19 2025, we’ll charge AUD 159.00 including taxes every year… We’ll tell you if this price ever changes. Cancel any time to stop future charges or change how you pay by managing your subscription in your Microsoft account.”
+- On 19 April 2025, the consumer's subscription was automatically renewed at the increased price of $159. The consumer was not aware that switching to the Classic plan at the existing subscription price of $109 was possible.
+Screenshots showing the communications with subscribers
+Email sent to subscribers informing them of the Copilot integration and price increase
+The page late in the cancellation process revealing the Classic plan
+A subscriber only saw this screen once they had navigated to the subscriptions section of their Microsoft account, selected “Cancel subscription”, and continued with the cancellation process.
+Background
+Microsoft Pty Ltd (Microsoft AU) is an Australian proprietary company, and a wholly owned subsidiary of the Microsoft Corporation (Microsoft US), a US-based technology conglomerate. Microsoft AU is the supplier of Microsoft’s proprietary software in Australia, including Microsoft 365 plans.
+The ACCC alleges Microsoft US was responsible for preparing and publishing the communications to Australian Microsoft 365 subscribers containing the misrepresentations alleged by the ACCC. The ACCC alleges that Microsoft AU adopted the communications as the seller of Microsoft 365 subscriptions to Australian consumers.
+The ACCC’s case only relates to Microsoft 365 Personal and Family plans, which are designed for home use. The case does not involve Microsoft 365 subscriptions for business or enterprise.
+Microsoft 365 Personal and Family offerings are supplied on a monthly or annual subscription basis, and are comprised of:
+- software products, such as Word, Excel, PowerPoint and OneNote
+- collaboration and communication applications like Outlook, Teams and SharePoint
+- cloud-based services through OneDrive.
+Microsoft launched Copilot as its consumer-facing generative AI product in 2023. Copilot was integrated into Microsoft 365 Personal and Family subscriptions in Australia on 31 October 2024.
+In January 2025, the Copilot integration was rolled out across Microsoft 365 worldwide, with varying subscription price increases applying to each jurisdiction.
+Competition, product safety, consumer and fair trading issues in the digital economy is a current ACCC compliance and enforcement priority.
+Maximum penalties
+For corporations, the maximum penalty for each breach of the Australian Consumer Law is the greater of:
+- $50 million
+- three times the total benefits that have been obtained and are reasonably attributable, or
+- if the total value of the benefits cannot be determined, 30 per cent of the corporation’s adjusted turnover during the breach turnover period.
+Any penalty that might apply to this conduct is a matter for the Court to determine and would depend on the Court’s findings. The ACCC will not comment on what penalties the Court may impose.
+Concise statement
+ACCC v Microsoft Concise Statement 27 October 2025 ( PDF 1.6 MB )
+This document contains the ACCC’s initiating court documents in relation to this matter. We will not be uploading further documents in the event these initial documents are subsequently amended.
+
+--------------------------------------------------------------------------------
+=== Article 23: Pre-emptive Z80 multitasking explainer ===
+
+Content:
+We read every piece of feedback, and take your input very seriously.
+To see all available qualifiers, see our documentation.
+Couldn't load subscription status. Retry
+There was an error while loading. Please reload this page.
+
+--------------------------------------------------------------------------------
+=== Article 24: OpenBSD C/C++ Toolchain in the Browser ===
+
+Content:
+This application requires JavaScript and WebAssembly enabled browser.
+
+--------------------------------------------------------------------------------
+=== Article 25: Isomorphic JS/TS Functions Orchestrator ===
+
+Content:
+This library provide a simple yet powerful, fast, secure, and extensible orchestrator for your JavaScript/Typescript functions, working both in browsers and Node/Bun/Deno, that can be used as base for your own low-code platform. The orchestration logic is defined in a simple JSON and use the power of JSONata for input/output transformation.
+Highlights:
+- Lighweight: Full orchestration logic is ~100LoC. No dependencies except JSONata.
+- Secure: User code provided as JSONata expression do not need to be sandboxed.
+- Extensible: Provide your own state mangement system or additional transition logic in a format different of JSONata (TODO).
+- Isomorphic: work on browser as well as on Node/Bun/Deno.
+- Typescript types available.
+- Open Source (MIT).
+- 100% Code Coverage.
+npm install js-functions-orchestrator
+Simple combination of two functions output as input for a third one:
+graph TD;
+f1-->Connection_0;
+f2-->Connection_0;
+Connection_0-->f3;
+import { Orchestrator } from 'js-functions-orchestrator';
+const orchestrator = new Orchestrator({
+functions: {
+fn1: async ()=>'Hello', //sync or async functions
+fn2: async ()=>'World',
+fn3: (/** @type {string} */echo)=>echo
+}
+});
+const runResult = await orchestrator.run({
+connections: [{
+from: ['fn1', 'fn2'],
+transition: '{"to":[[$.from[0] & " " & $.from[1]]]}', //the result of fn1 (the string "Hello") is combined with the the result of fn2 (the string "World") and used as input for fn3
+to: ['fn3']
+}]
+});
+console.log(runResult);
+/* output:
+{
+results: { fn3: 'Hello World' },
+variables: { global: {}, locals: [ {} ] }
+}
+*/
+More complex scenario with a loop:
+graph TD;
+f1-->Connection_0;
+f2-->Connection_0;
+Connection_0-->f3;
+f3-->Connection_1;
+Connection_1-->f3;
+Connection_1-->f4;
+import { Orchestrator } from 'js-functions-orchestrator';
+const orchestrator = new Orchestrator({
+functions: {
+f1: async a=>a,
+f2: async a=>a,
+f3: async a=>a,
+f4: async a=>a
+}
+});
+const runResult = await orchestrator.run({
+//initial set of functions that start the orchestration with the array of their input parameters
+inits: {
+f1: ['hello'],
+f2: ['world']
+},
+connections: [{
+from: ['f1', 'f2'],
+transition: '{"to": [[ $.from[0] & " " & $.from[1] ]]}',
+to: ['f3']
+}, {
+from: ['f3'],
+transition: '($i:=$.local.i; $i:=($i?$i:0)+1; $y:=$.global.t; {"global":{"t":1}, "local":{"i":$i}, "to": [[$.from[0] & " " & $string($i)], $i<5?[[$.from[0]]]:null]})',
+to: ['f4', 'f3']
+}]
+});
+console.log(runResult);
+/* output:
+{
+results: { f4: 'hello world 5' },
+variables: { global: { t: 1 }, locals: [ {}, { i: 5 } ] }
+}
+*/
+More examples are available in the index.test.js.
+Live at Github Pages
+<html>
+<script type="module">
+import { Orchestrator } from 'https://esm.run/js-functions-orchestrator';
+const orchestrator = new Orchestrator({
+functions: {
+//sync or async functions
+fn1: echo=>echo,
+fn2: async echo=>echo,
+fn3: echo=>echo
+}
+});
+const runResult = await orchestrator.run({
+inits: {
+fn1: ['Hello'],
+fn2: ['World']
+},
+connections: [{
+from: ['fn1', 'fn2'],
+transition: '{ "to":[[ $.from[0] & " " & $.from[1] ]] }', //the result of fn1 (the string "Hello") is combined with the the result of fn2 (the string "World") and used as input for fn3
+to: ['fn3']
+}]
+});
+document.body.innerText = JSON.stringify(runResult);
+console.log(runResult);
+/* output:
+{
+results: { fn3: 'Hello World' },
+variables: { global: {}, locals: [ {} ] }
+}
+*/
+</script>
+</html>
+The orchestration graph is defined only through a list of connections
+between JS functions, and optionally an initial set of starting functions with user defined inputs. A single connection can be from
+multiple JS functions to
+multiple JS functions and may include the transformation logic for the outputs of the from
+JS functions to the inputs of the to
+JS functions. After the initial execution of all the functions with user defined inputs, the different connections are sequentially looped and each connection start only when all the from
+JS functions have Promises of results. Once awaited, their results are provided to the transformation logic and the results of the transformation are the inputs for the different to
+JS functions that are then executed.
+In more details the orchestration logic is the following:
+-
+Initialization of starting functions with user defined inputs
+- The selected functions are executed and their result Promise stored
+-
+Loop all connections
+-
+If there are available results for every
+"from"
+function, the connection start- Execute the transition
+- JSONata returning
+{"to":[…]}
+- Available
+$.from
+array,$.global
+object, and$.local
+object
+- JSONata returning
+- Store transition results as inputs for all the
+"connection.to"
+functions - Delete all the
+"from"
+results - Execute all the
+"to"
+functions with the available inputs from the transition- If input is
+"null"
+the function is not executed (loop exit condition)
+- If input is
+- Execute the transition
+-
+Do until no more connections can start
+- Note: incorrectly designed graphs can lead to infinite executions.
+-
+Return all the remaining functions and connections results
+{
+// Functions with user defined inputs. These functions will start the orchestration. When not defined, initial functions will be identified checking on the connections all the "from" functions that are never connected to a "to".
+"init": {
+// Key is the identifier of the function, value is the array of expected parameters.
+"fn1": [],
+"fn2": []
+},
+// List of existing connections between functions. The orchestrator will loop the connections untill no one can start.
+"connections": [{
+// A connection require a non empty "from" array, containing the identifier of the functions that origin the connection. The connection start only when all the functions in the "from" have been executed and have a resulting Promise. In this case all the "from" Promises are awaited, and their results are made available in the JSONata of the "transition".
+"from": ["fn1", "fn2"],
+//JSONata expression that must return at least the JSON { "to": [] }. "to" must be an array of the same size of the "connection.to" array, containing an array of input parameters (as array) for the relative "connection.to" function. Additionally it can return "global", and "local", to store respectively globally and locally scoped variables (a global variable is visible in all the connection transition, while a local variable only in the same transition but across multiple execution). If the transition is not provided the output of the "from" functions are provided directly as inputs to the "to" functions. In such case "from" and "to" array must be of the same size.
+"transition": "{\"to\": [[ $.from[0] & \" \" & $.from[1] ]]}",
+// List of functions that can consume the output of the "transition" as their inputs. The functions are executed and next connection is checked until no more connections can start.
+"to": ["fn3"]
+}]
+}
+
+--------------------------------------------------------------------------------

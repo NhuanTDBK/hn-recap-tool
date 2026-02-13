@@ -10,10 +10,10 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from agents import Agent, Runner, ModelSettings
+from agents import Agent, Runner, ModelSettings, WebSearchTool
 
-from app.application.interfaces import SummarizationService
-from app.infrastructure.config.settings import settings
+from backend.app.application.interfaces import SummarizationService
+from backend.app.infrastructure.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ class OpenAISummarizationService(SummarizationService):
         max_tokens: int = 2000,
         temperature: float = 0.3,
         chunk_size: int = 8000,
+        max_length: int = 128_000,
     ):
         """Initialize the OpenAI summarization service.
 
@@ -50,6 +51,7 @@ class OpenAISummarizationService(SummarizationService):
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        self.max_length = max_length
 
         # Load prompts from markdown files
         prompts_dir = Path(__file__).parent / "prompts"
@@ -62,6 +64,7 @@ class OpenAISummarizationService(SummarizationService):
             instructions=summarizer_prompt,
             model=self.model,
             model_settings=model_settings,
+            tools=[WebSearchTool()],
         )
 
         # Create reducer agent for combining chunk summaries
@@ -116,13 +119,10 @@ class OpenAISummarizationService(SummarizationService):
             Summary of the chunk
         """
         try:
-            prompt = f"Summarize the following content:\n\n{chunk}"
+            prompt = f"Summarize the following content, search the web for more information and give your opinions on the article:\n\n{chunk}"
 
             # Run the agent using Runner.run() - the recommended SDK approach
-            result = await Runner.run(
-                self.summarizer_agent,
-                input=prompt
-            )
+            result = await Runner.run(self.summarizer_agent, input=prompt)
 
             summary = result.final_output if result.final_output else ""
             logger.info(f"Successfully summarized chunk {chunk_index}")
@@ -146,17 +146,13 @@ class OpenAISummarizationService(SummarizationService):
 
         try:
             combined = "\n\n".join(
-                f"Part {i+1}:\n{summary}"
-                for i, summary in enumerate(summaries)
+                f"Part {i+1}:\n{summary}" for i, summary in enumerate(summaries)
             )
 
             prompt = f"Synthesize these partial summaries into one comprehensive summary:\n\n{combined}"
 
             # Run the reducer agent using Runner.run() - the recommended SDK approach
-            result = await Runner.run(
-                self.reducer_agent,
-                input=prompt
-            )
+            result = await Runner.run(self.reducer_agent, input=prompt)
 
             final_summary = result.final_output if result.final_output else ""
             logger.info("Successfully reduced summaries into final summary")

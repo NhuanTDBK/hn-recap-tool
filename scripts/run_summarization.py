@@ -23,10 +23,10 @@ from pathlib import Path
 from typing import List, Dict
 
 from dotenv import load_dotenv
-from agents import Agent, Runner, ModelSettings
 
 from backend.app.infrastructure.repositories.jsonl_post_repo import JSONLPostRepository
 from backend.app.infrastructure.repositories.jsonl_content_repo import JSONLContentRepository
+from backend.app.infrastructure.services.openai_summarization_service import OpenAISummarizationService
 from backend.app.domain.entities import Post
 
 
@@ -67,7 +67,7 @@ def save_summaries(summaries: List[Dict], output_dir: Path):
     # Also save a human-readable version
     markdown_file = output_dir / f"{timestamp}-summaries.md"
     with open(markdown_file, "w", encoding="utf-8") as f:
-        f.write(f"# Article Summaries\n\n")
+        f.write("# Article Summaries\n\n")
         f.write(f"Generated: {datetime.now().isoformat()}\n\n")
         f.write(f"Total articles: {len(summaries)}\n\n")
         f.write("---\n\n")
@@ -179,27 +179,18 @@ async def main():
 
     logger.info(f"Found {len(posts_with_content)} posts with content")
 
-    # Load system prompt from file
-    logger.info("Loading summarization prompt...")
-    prompts_dir = backend_dir / "app" / "infrastructure" / "services" / "prompts"
-    summarizer_prompt = (prompts_dir / "summarizer.md").read_text()
-
-    # Initialize summarization agent
-    logger.info("Initializing OpenAI summarization agent...")
-
-    model = "gpt-4o-mini"
-    model_settings = ModelSettings(
-        max_tokens=500,  # Shorter summaries
-        temperature=0.3,
-    )
-
-    # Create summarization agent
-    summarizer_agent = Agent(
-        name="Article Summarizer",
-        instructions=summarizer_prompt,
-        model=model,
-        model_settings=model_settings,
-    )
+    # Initialize summarization service
+    logger.info("Initializing OpenAI summarization service...")
+    try:
+        summarization_service = OpenAISummarizationService(
+            model="gpt-4o-mini",
+            max_tokens=500,  # Shorter summaries
+            temperature=0.3,
+        )
+    except ValueError as e:
+        logger.error(f"Failed to initialize summarization service: {e}")
+        logger.error("Make sure OPENAI_API_KEY is set in your .env file")
+        sys.exit(1)
 
     # Process posts asynchronously
     logger.info("Starting summarization...")
@@ -211,12 +202,8 @@ async def main():
             if not post.content:
                 raise ValueError("Post has no content to summarize")
 
-            # Run the summarization agent
-            prompt = f"Summarize this article:\n\n{post.content}"
-            result = await Runner.run(summarizer_agent, input=prompt)
-            summary_text = (
-                result.final_output if result.final_output else "[No summary generated]"
-            )
+            # Use the summarization service
+            summary_text = await summarization_service.summarize(post.content)
 
             logger.info(
                 f"✓ Summarized post {post.hn_id}: {post.title[:60]}..."
@@ -228,7 +215,7 @@ async def main():
                 "summary": summary_text,
                 "url": post.url,
                 "timestamp": datetime.now().isoformat(),
-                "model": model,
+                "model": summarization_service.model,
             }
 
         except Exception as e:
@@ -248,7 +235,7 @@ async def main():
 
     # Save results
     logger.info("Saving summaries...")
-    markdown_file = save_summaries(summaries, output_dir)
+    save_summaries(summaries, output_dir)
 
     # Print summary statistics
     successful = sum(1 for s in summaries if "error" not in s)
@@ -261,8 +248,8 @@ async def main():
     logger.info(f"Successful: {successful}")
     logger.info(f"Failed: {failed}")
     logger.info(f"Output directory: {output_dir}")
-    logger.info(f"To push to Telegram, run:")
-    logger.info(f"  python scripts/push_to_telegram.py")
+    logger.info("To push to Telegram, run:")
+    logger.info("  python scripts/push_to_telegram.py")
     logger.info("=" * 60)
 
 

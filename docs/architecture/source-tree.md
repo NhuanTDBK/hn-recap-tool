@@ -1,386 +1,589 @@
-# Source Tree - Project Structure
+# Updated Project Structure
 
-**Project:** HackerNews Knowledge Graph Builder
-**Version:** 1.0 (Sprint 1)
-**Last Updated:** 2025-10-21
+**Status:** Brainstormed based on requirements analysis  
+**Date:** February 13, 2026  
+**Context:** Aligning current MVP structure with [spec.md](../spec.md) and [activity documents](../activities/README.md)
 
 ---
 
-## Project Root Structure
+## Gap Analysis: Current vs. Target
+
+| Area | Current | Target (Spec) | Gap |
+|------|---------|---------------|-----|
+| **User model** | Email/password (web app) | Telegram-first (`telegram_id`, `interests`, `memory_enabled`) | Complete rewrite |
+| **Storage** | JSONL files on disk | PostgreSQL + RocksDB | New layer needed |
+| **Bot** | None | aiogram 3.x with FSM states | Entire new subsystem |
+| **Domain entities** | User, Post, Comment, Digest | + Delivery, Conversation, Memory | 3 new entities |
+| **Agents** | Summarizer, Reducer, Synthesizer | + Discussion, Memory Extraction | 2 new agents |
+| **Pipeline** | Separate CLI scripts | APScheduler orchestrator | Orchestration layer |
+| **Interfaces** | Monolithic 529-line file | Split by concern + new repos | Refactor + expansion |
+| **Content storage** | Filesystem (`data/content/`) | RocksDB with column families | New adapter |
+| **Presentation** | FastAPI REST API | FastAPI + Telegram bot handlers | Bot handlers layer |
+| **Database** | None (JSONL) | SQLAlchemy + Alembic | Full ORM layer |
+
+---
+
+## Proposed Directory Structure
 
 ```
 hackernews_digest/
-├── .bmad-core/              # BMAD agent configuration (do not modify)
-├── .ai/                     # AI debug logs
-├── backend/                 # Python FastAPI backend
-│   ├── app/                 # Application code
+├── backend/
+│   ├── alembic/                          # 🆕 Database migrations
+│   │   ├── env.py
+│   │   ├── script.py.mako
+│   │   └── versions/
+│   │       └── 001_initial_schema.py
+│   │
+│   ├── app/
 │   │   ├── __init__.py
-│   │   ├── main.py          # FastAPI app entry point
-│   │   ├── config.py        # Configuration & settings
-│   │   ├── api/             # API routes
+│   │   ├── main.py                       # FastAPI entry point
+│   │   │
+│   │   ├── domain/                       # ── DOMAIN LAYER ──
 │   │   │   ├── __init__.py
-│   │   │   ├── auth.py      # Authentication endpoints
-│   │   │   └── digests.py   # Digest endpoints
-│   │   ├── models/          # Pydantic models
+│   │   │   ├── entities.py               # 🔄 Expand: + Delivery, Conversation, MemoryEntry
+│   │   │   │                              #    Rewrite User for Telegram (telegram_id, interests)
+│   │   │   ├── value_objects.py          # PostType, ReactionType, DiscussionState, MemoryCategory
+│   │   │   └── exceptions.py
+│   │   │
+│   │   ├── application/                  # ── APPLICATION LAYER ──
 │   │   │   ├── __init__.py
-│   │   │   ├── user.py      # User models
-│   │   │   └── digest.py    # Digest models
-│   │   ├── services/        # Business logic
+│   │   │   ├── interfaces/               # 🔄 Split 529-line interfaces.py → per-concern files
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── repositories.py       #   UserRepo, PostRepo, DigestRepo, CommentRepo,
+│   │   │   │   │                          #   DeliveryRepo 🆕, ConversationRepo 🆕, MemoryRepo 🆕
+│   │   │   │   ├── content_storage.py    #   ContentRepository (text/html/markdown)
+│   │   │   │   ├── services.py           #   HNService, ContentExtractor, CacheService,
+│   │   │   │   │                          #   SummarizationService, SynthesisService
+│   │   │   │   ├── agents.py             # 🆕 DiscussionService, MemoryExtractionService
+│   │   │   │   └── security.py           #   PasswordHasher, TokenService
+│   │   │   │
+│   │   │   └── use_cases/
+│   │   │       ├── __init__.py
+│   │   │       ├── collection.py          # Fetch HN posts (existing)
+│   │   │       ├── crawl_content.py       # Crawl article URLs (existing)
+│   │   │       ├── summarization.py       # Generate summaries (existing)
+│   │   │       ├── synthesis.py           # 🔄 Extract from scripts → use case
+│   │   │       ├── delivery.py           # 🆕 Digest delivery to users
+│   │   │       ├── discussion.py         # 🆕 Start/switch/end discussions
+│   │   │       ├── memory.py             # 🆕 Extract/search/manage memory
+│   │   │       ├── auth.py               # (existing, may deprecate for Telegram-only)
+│   │   │       └── digests.py            # (existing)
+│   │   │
+│   │   ├── infrastructure/              # ── INFRASTRUCTURE LAYER ──
 │   │   │   ├── __init__.py
-│   │   │   ├── auth.py      # Auth logic (JWT, password hashing)
-│   │   │   ├── hn_client.py # HN API client
-│   │   │   └── storage.py   # JSONL file operations
-│   │   ├── jobs/            # Background jobs
-│   │   │   ├── __init__.py
-│   │   │   └── collector.py # HN data collection job
-│   │   └── utils/           # Utilities
+│   │   │   │
+│   │   │   ├── config/
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── settings.py           # 🔄 Add: database_url, redis_url, telegram_bot_token
+│   │   │   │
+│   │   │   ├── database/                 # 🆕 SQLAlchemy + Alembic
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── base.py               #   Base, engine, metadata
+│   │   │   │   ├── models.py             #   ORM models (mirrors domain entities)
+│   │   │   │   └── session.py            #   AsyncSession factory
+│   │   │   │
+│   │   │   ├── repositories/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── jsonl/                # 🔄 Namespace existing JSONL repos (keep for local dev)
+│   │   │   │   │   ├── __init__.py
+│   │   │   │   │   ├── helpers.py
+│   │   │   │   │   ├── post_repo.py
+│   │   │   │   │   ├── content_repo.py
+│   │   │   │   │   ├── digest_repo.py
+│   │   │   │   │   └── user_repo.py
+│   │   │   │   ├── postgres/             # 🆕 PostgreSQL implementations (production)
+│   │   │   │   │   ├── __init__.py
+│   │   │   │   │   ├── post_repo.py
+│   │   │   │   │   ├── user_repo.py
+│   │   │   │   │   ├── delivery_repo.py
+│   │   │   │   │   ├── conversation_repo.py
+│   │   │   │   │   └── memory_repo.py
+│   │   │   │   └── rocksdb/              # 🆕 RocksDB content storage (replaces filesystem)
+│   │   │   │       ├── __init__.py
+│   │   │   │       └── content_store.py  #   Column families: html, text, markdown
+│   │   │   │
+│   │   │   ├── services/                 # External service integrations
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── hn_client.py
+│   │   │   │   ├── enhanced_content_extractor.py
+│   │   │   │   ├── crawl_status_tracker.py
+│   │   │   │   ├── redis_cache.py
+│   │   │   │   ├── telegram_notifier.py
+│   │   │   │   └── content_extractor.py
+│   │   │   │
+│   │   │   ├── agents/                   # 🔄 Rename from services (AI/LLM-specific)
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── summarization_agent.py    # OpenAI summarizer + reducer
+│   │   │   │   ├── synthesis_agent.py        # OpenAI general + topic synthesis
+│   │   │   │   ├── discussion_agent.py       # 🆕 Multi-turn conversation agent
+│   │   │   │   ├── memory_extraction_agent.py # 🆕 Extract insights from interactions
+│   │   │   │   └── prompts/
+│   │   │   │       ├── summarizer.md
+│   │   │   │       ├── reducer.md
+│   │   │   │       ├── general_synthesis.md
+│   │   │   │       ├── synthesis_topic.md
+│   │   │   │       ├── discussion.md         # 🆕
+│   │   │   │       └── memory_extraction.md  # 🆕
+│   │   │   │
+│   │   │   ├── pipeline/                 # 🆕 Pipeline orchestration (Activity 1.7)
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── orchestrator.py       #   PipelineOrchestrator (APScheduler)
+│   │   │   │   ├── steps.py              #   Step definitions (collect, crawl, summarize, etc.)
+│   │   │   │   └── reporting.py          #   Run reports, timing, metrics
+│   │   │   │
+│   │   │   ├── security/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── jwt_handler.py        # (may deprecate if Telegram-only)
+│   │   │   │   └── password_hasher.py    # (may deprecate if Telegram-only)
+│   │   │   │
+│   │   │   └── jobs/                     # 🔄 Thin wrappers → delegate to pipeline
+│   │   │       ├── __init__.py
+│   │   │       └── data_collector.py
+│   │   │
+│   │   └── presentation/               # ── PRESENTATION LAYER ──
 │   │       ├── __init__.py
-│   │       ├── jsonl.py     # JSONL read/write helpers
-│   │       └── cache.py     # Redis cache helpers
-│   ├── tests/               # Test files
+│   │       ├── api/                      # FastAPI REST API (existing)
+│   │       │   ├── __init__.py
+│   │       │   ├── auth.py
+│   │       │   ├── digests.py
+│   │       │   └── dependencies.py
+│   │       ├── schemas/                  # API request/response schemas
+│   │       │   ├── __init__.py
+│   │       │   ├── user.py
+│   │       │   └── digest.py
+│   │       └── bot/                     # 🆕 Telegram bot (aiogram 3.x) - Phase 3-7
+│   │           ├── __init__.py
+│   │           ├── bot.py               #   Bot instance, dispatcher setup
+│   │           ├── states.py            #   FSM states (IDLE, DISCUSSION, ONBOARDING)
+│   │           ├── handlers/
+│   │           │   ├── __init__.py
+│   │           │   ├── commands.py      #   /start, /pause, /saved, /memory, /token
+│   │           │   ├── callbacks.py     #   Inline button callbacks (discuss, save, react)
+│   │           │   ├── discussion.py    #   Discussion message routing
+│   │           │   └── onboarding.py    #   Interest selection flow
+│   │           ├── keyboards/
+│   │           │   ├── __init__.py
+│   │           │   └── inline.py        #   Button layouts (Discuss, Read, Save, 👍👎)
+│   │           ├── middlewares/
+│   │           │   ├── __init__.py
+│   │           │   └── auth.py          #   User registration/lookup middleware
+│   │           └── formatters/
+│   │               ├── __init__.py
+│   │               └── digest.py        #   Message formatting (Style 1 & 2)
+│   │
+│   ├── tests/
 │   │   ├── __init__.py
-│   │   ├── test_auth.py
-│   │   ├── test_digests.py
-│   │   └── test_collector.py
-│   ├── pyproject.toml       # Poetry dependencies
-│   ├── poetry.lock          # Locked dependencies
-│   └── .env.example         # Environment variable template
+│   │   ├── unit/
+│   │   │   ├── __init__.py
+│   │   │   ├── domain/                   # Entity validation tests
+│   │   │   ├── use_cases/                # Business logic tests (mocked deps)
+│   │   │   └── agents/                   # Agent prompt/behavior tests
+│   │   ├── integration/
+│   │   │   ├── __init__.py
+│   │   │   ├── repositories/             # JSONL + Postgres repo tests
+│   │   │   ├── services/                 # HN client, content extractor tests
+│   │   │   └── bot/                      # 🆕 Bot handler tests (aiogram test utils)
+│   │   ├── e2e/                          # 🆕 Full pipeline tests
+│   │   │   └── test_pipeline.py
+│   │   ├── fixtures/                     # 🆕 Shared test data
+│   │   │   ├── posts.py
+│   │   │   └── users.py
+│   │   └── conftest.py
+│   │
+│   ├── alembic.ini                       # 🆕
+│   ├── pyproject.toml
+│   ├── Dockerfile
+│   └── .env.example
 │
-├── frontend/                # Next.js frontend (Sprint 2+)
-│   ├── src/
-│   │   ├── app/             # Next.js 14 app directory
-│   │   ├── components/      # React components
-│   │   └── lib/             # Utilities
-│   ├── public/              # Static assets
-│   ├── package.json
-│   └── tsconfig.json
+├── data/                                 # 🔄 MINIMAL - only RocksDB + memory files
+│   ├── content.rocksdb/                  # Content blobs (3 column families: html, text, markdown)
+│   └── memory/                           # 🆕 Phase 6 — per-user memory files
+│       └── {user_id}/
+│           ├── MEMORY.md                 # Durable facts (< 2000 words)
+│           ├── memory/
+│           │   └── YYYY-MM-DD.md         # Daily notes
+│           └── index/                    # BM25 search index
 │
-├── data/                    # Data storage (JSONL files)
-│   ├── raw/                 # Raw HN data
-│   │   ├── YYYY-MM-DD-posts.jsonl
-│   │   ├── YYYY-MM-DD-content.jsonl.gz
-│   │   └── YYYY-MM-DD-comments.jsonl
-│   ├── processed/           # Processed data (Sprint 2+)
-│   │   ├── YYYY-MM-DD-topics.jsonl
-│   │   ├── YYYY-MM-DD-summaries.jsonl
-│   │   └── YYYY-MM-DD-digest.jsonl
-│   └── users/               # User data
-│       ├── user-profiles.jsonl
-│       └── user-votes.jsonl
+├── scripts/
+│   ├── fetch_hn_posts.py
+│   ├── crawl_content.py
+│   ├── run_summarization.py
+│   ├── run_synthesis.py
+│   ├── run_synthesis_topic.py
+│   ├── push_to_telegram.py
+│   ├── run_pipeline.py                   # 🆕 Unified pipeline CLI
+│   ├── run_bot.py                        # 🆕 Start Telegram bot (polling mode)
+│   └── run_full_flow.py
 │
-├── docs/                    # Documentation
-│   ├── architecture/        # Architecture docs (this folder)
-│   ├── epics/               # Epic files
-│   ├── stories/             # Story files for development
-│   ├── prd.md               # Product Requirements Document
-│   └── sprint-plan.md       # Sprint plan
+├── docs/
+│   ├── activities/
+│   ├── architecture/
+│   ├── epics/
+│   ├── spec.md
+│   └── ...
 │
-├── scripts/                 # Utility scripts
-│   ├── setup.sh             # Initial setup script
-│   └── run_collector.py     # Run data collection manually
-│
-├── docker-compose.yml       # Local development environment
-├── Dockerfile               # Backend Docker image
-├── .env                     # Environment variables (gitignored)
-├── .gitignore
+├── docker-compose.yml                    # 🔄 Add postgres + redis + pgadmin
+├── pyproject.toml
+├── AGENTS.md
 └── README.md
 ```
 
 ---
 
-## Backend Directory Details
+## Key Structural Decisions
 
-### `/backend/app/main.py`
-**Purpose:** FastAPI application entry point
+### 1. **Split `interfaces.py` (529 lines) → `interfaces/` package**
 
-**Contents:**
-- FastAPI app initialization
-- CORS configuration
-- Router registration
-- Startup/shutdown events (Redis connection, job scheduler)
+The monolithic interfaces file is hard to navigate. Split by concern:
 
-### `/backend/app/config.py`
-**Purpose:** Configuration and settings
+| File | Interfaces |
+|------|-----------|
+| `repositories.py` | UserRepo, PostRepo, DigestRepo, CommentRepo, **DeliveryRepo**, **ConversationRepo**, **MemoryRepo** |
+| `content_storage.py` | ContentRepository (html/text/markdown) |
+| `services.py` | HNService, ContentExtractor, CacheService, SummarizationService, SynthesisService |
+| `agents.py` | **DiscussionService**, **MemoryExtractionService** |
+| `security.py` | PasswordHasher, TokenService |
 
-**Contents:**
-- Pydantic Settings class
-- Environment variable loading
-- Constants (JWT settings, file paths, etc.)
-
-### `/backend/app/api/`
-**Purpose:** API route handlers
-
-**Files:**
-- `auth.py` - `/api/auth/*` endpoints (register, login, me)
-- `digests.py` - `/api/digests/*` endpoints (list, get by date, get post)
-
-### `/backend/app/models/`
-**Purpose:** Pydantic models for request/response validation
-
-**Files:**
-- `user.py` - User, UserCreate, UserInDB, Token models
-- `digest.py` - Post, Digest, DigestList models
-
-### `/backend/app/services/`
-**Purpose:** Business logic and external integrations
-
-**Files:**
-- `auth.py` - JWT token creation/validation, password hashing
-- `hn_client.py` - HN Algolia API client (fetch posts, comments)
-- `storage.py` - JSONL file read/write, caching logic
-
-### `/backend/app/jobs/`
-**Purpose:** Background scheduled jobs
-
-**Files:**
-- `collector.py` - HN data collection job (runs daily via APScheduler)
-
-### `/backend/app/utils/`
-**Purpose:** Shared utilities
-
-**Files:**
-- `jsonl.py` - JSONL read/write helpers, gzip compression
-- `cache.py` - Redis connection and caching helpers
+**Migration strategy:** Re-export all interfaces from `interfaces/__init__.py` for backward compatibility.
 
 ---
 
-## Data Directory Structure
+### 2. **Separate `agents/` from `services/`**
 
-### `/data/raw/`
-**Purpose:** Raw data from HN API
+Current: agents (summarization, synthesis) live in `services/` alongside non-AI services (HN client, Redis, Telegram). These have fundamentally different concerns:
 
-**File Naming:**
-- `YYYY-MM-DD-posts.jsonl` - Front page stories metadata
-- `YYYY-MM-DD-content.jsonl.gz` - Article content (gzipped)
-- `YYYY-MM-DD-comments.jsonl` - Comment threads
+- **services/**: HTTP clients, caches, notifiers — deterministic, infrastructure
+- **agents/**: LLM-powered, prompt-driven, stochastic — AI orchestration
 
-**Example:** `2025-10-21-posts.jsonl`
-
-### `/data/processed/`
-**Purpose:** Processed data (Sprint 2+)
-
-**Files:**
-- `YYYY-MM-DD-topics.jsonl` - Topic clusters
-- `YYYY-MM-DD-summaries.jsonl` - Generated summaries
-- `YYYY-MM-DD-digest.jsonl` - Assembled digest
-
-### `/data/users/`
-**Purpose:** User data
-
-**Files:**
-- `user-profiles.jsonl` - User accounts (append-only)
-- `user-votes.jsonl` - Voting history (Sprint 3+)
+**Benefit:** Clear separation of AI vs. traditional services, easier to swap LLM providers.
 
 ---
 
-## File Naming Conventions
+### 3. **New `pipeline/` package (Activity 1.7)**
 
-### Python Files
-- **Modules:** `snake_case.py` (e.g., `hn_client.py`)
-- **Classes:** `PascalCase` (e.g., `HNClient`)
-- **Functions:** `snake_case` (e.g., `fetch_front_page`)
-- **Constants:** `UPPER_SNAKE_CASE` (e.g., `MAX_POSTS_PER_DAY`)
+Replace ad-hoc `jobs/data_collector.py` with a proper orchestration layer:
 
-### Data Files
-- **Date-partitioned:** `YYYY-MM-DD-{type}.jsonl`
-- **User data:** `{type}.jsonl` (append-only)
-- **Compressed:** Add `.gz` extension
+- `orchestrator.py` — APScheduler setup, step chaining, error isolation
+- `steps.py` — Each pipeline step as a callable with clear input/output
+- `reporting.py` — Run timing, success/failure metrics, per-step stats
 
-### Test Files
-- **Pattern:** `test_{module_name}.py`
-- **Example:** `test_hn_client.py`
+**Pipeline Steps:**
+1. Collect (fetch HN posts)
+2. Crawl (extract content from URLs)
+3. Summarize (generate AI summaries)
+4. Synthesize (cross-article themes)
+5. Deliver (send to Telegram)
+6. Extract Memory (daily batch - Phase 6)
 
 ---
 
-## Import Patterns
+### 4. **New `presentation/bot/` package (Phase 3-7)**
 
-### Absolute Imports (Preferred)
+The Telegram bot is a separate presentation concern from the REST API:
+
+- `handlers/` — Message and callback routing (like API routes)
+- `keyboards/` — Inline button definitions (like API schemas)
+- `states.py` — FSM state definitions (IDLE, DISCUSSION, ONBOARDING)
+- `middlewares/` — User auth/registration per message
+- `formatters/` — Message formatting (Style 1 brief, Style 2 flat scroll)
+
+**Key files:**
+- `bot.py` — Bot instance, dispatcher, FSM storage
+- `handlers/callbacks.py` — Inline button callbacks (💬 Discuss, ⭐ Save, 👍👎)
+- `handlers/discussion.py` — Route messages during DISCUSSION state to agent
+- `formatters/digest.py` — Format digest messages (Style 1 vs. 2)
+
+---
+
+### 5. **Dual repository implementations**
+
+Keep JSONL repos working (MVP) while adding Postgres repos (production):
+
+```
+repositories/
+├── jsonl/          # Current — keep working for local dev
+└── postgres/       # New — SQLAlchemy async ORM
+```
+
+**Switch via config:** `STORAGE_BACKEND=jsonl|postgres`
+
+**Why keep JSONL:**
+- No database setup needed for first-time contributors
+- Fast iteration during development
+- Easy debugging (cat files vs. SQL queries)
+- Postgres for production only
+
+---
+
+### 6. **RocksDB replaces filesystem for content**
+
+**Before:**
+```
+data/content/
+├── html/{hn_id}.html
+├── text/{hn_id}.txt
+└── markdown/{hn_id}.md
+```
+
+**After:**
+```
+data/content.rocksdb/  (single database with column families)
+```
+
+**Benefits:**
+- 70% space savings (built-in Zstandard compression)
+- No filesystem overhead (inodes, blocks, metadata per file)
+- O(1) key-value access by HN ID
+- Single-writer optimized (LSM tree architecture)
+- Simple backup (copy one directory)
+
+**See:** [Activity 1.5 - RocksDB Content Storage](../activities/activity-1.5-rocksdb-content-storage.md)
+
+---
+
+### 7. **Domain entity expansion**
+
+**New entities needed** (from [spec.md](../spec.md) data model):
+
 ```python
-from app.services.hn_client import HNClient
-from app.models.digest import Post
-from app.utils.jsonl import read_jsonl, write_jsonl
+class Delivery(BaseModel):
+    """Track which posts were delivered to which users."""
+    user_id: str
+    post_id: str
+    message_id: int              # Telegram message ID
+    batch_id: str                # Groups posts in same digest
+    reaction: Optional[str]      # "up" | "down" | None
+    delivered_at: datetime
+
+class Conversation(BaseModel):
+    """Store discussion history between user and bot."""
+    user_id: str
+    post_id: str
+    messages: list[dict]         # [{role, content, timestamp}, ...]
+    token_usage: dict            # {input_tokens, output_tokens}
+    started_at: datetime
+    ended_at: Optional[datetime]
+
+class MemoryEntry(BaseModel):
+    """Store extracted user knowledge and preferences."""
+    user_id: str
+    type: str                    # "interest" | "fact" | "discussion_note"
+    content: str
+    source_post_id: Optional[str]
+    active: bool = True
+    created_at: datetime
 ```
 
-### Relative Imports (Within Same Package)
+**User entity needs rewrite** for Telegram-first:
+
 ```python
-# In app/api/digests.py
-from ..services.storage import get_digest
-from ..models.digest import Digest
+class User(BaseModel):
+    telegram_id: int             # Primary identifier (not email)
+    username: Optional[str]
+    interests: list[str]         # ["distributed systems", "rust"]
+    active_discussion_post_id: Optional[str]
+    memory_enabled: bool = True
+    status: str = "active"       # "active" | "paused"
+    created_at: datetime
+    # Remove: email, hashed_password (no web auth needed)
 ```
 
 ---
 
-## Configuration Files
+### 8. **New use cases**
 
-### `/backend/pyproject.toml`
-**Purpose:** Poetry project configuration
+| Use Case | Purpose | Phase | Activity |
+|----------|---------|-------|----------|
+| `delivery.py` | Rank posts × user interests, send digest via Telegram | 3 | 3.0 |
+| `discussion.py` | Start/switch/end discussions, load context, save convo | 5 | 5.0 |
+| `memory.py` | Extract memory from interactions, search, manage | 6 | 6.0 |
+| `synthesis.py` | Extract from `scripts/run_synthesis.py` → use case | 2 | Current |
 
-**Sections:**
-- `[tool.poetry]` - Project metadata
-- `[tool.poetry.dependencies]` - Production dependencies
-- `[tool.poetry.dev-dependencies]` - Development dependencies
-- `[tool.black]` - Black formatter config
-- `[tool.ruff]` - Ruff linter config
-- `[tool.pytest.ini_options]` - Pytest config
+---
 
-### `/backend/.env`
-**Purpose:** Environment variables (gitignored)
+### 9. **Minimal `data/` folder**
 
-**Example:**
+With RocksDB + PostgreSQL, the `data/` folder shrinks to almost nothing:
+
+| Current `data/` path | New home |
+|---|---|
+| `raw/*.jsonl` (post metadata) | PostgreSQL `posts` table |
+| `content/html/`, `text/`, `markdown/` | RocksDB column families |
+| `processed/summaries/` | PostgreSQL `posts.summary` column |
+| `processed/synthesis/` | PostgreSQL `synthesis` table |
+| `users/` | PostgreSQL `users` table |
+| `crawl_status.jsonl` | PostgreSQL `posts.is_crawl_success` |
+
+**What remains:**
+- `content.rocksdb/` — Content blobs with compression
+- `memory/` — Per-user memory files (Phase 6, could move to PostgreSQL later)
+
+---
+
+## Migration Roadmap
+
+Recommended order to avoid breaking existing functionality:
+
+### Phase 0: Refactor (No Breaking Changes)
+
+1. **Split interfaces** → `interfaces/` package (re-export from `__init__.py`, zero breakage)
+2. **Move agents** → `infrastructure/agents/` (rename imports in use cases)
+3. **Add synthesis use case** (extract from `scripts/run_synthesis.py`)
+
+### Phase 1: Database Layer
+
+4. **Add database ORM** (`infrastructure/database/`)
+5. **Create Alembic migrations** (initial schema: users, posts, deliveries, conversations, memory)
+6. **Add Postgres repos** alongside JSONL repos (dual backend support)
+
+### Phase 2: Content Storage
+
+7. **Implement RocksDB adapter** (`repositories/rocksdb/content_store.py`)
+8. **Migrate existing content** (one-time script: filesystem → RocksDB)
+9. **Update crawl pipeline** to use RocksDB
+
+### Phase 3: Pipeline Orchestration
+
+10. **Create pipeline package** (`infrastructure/pipeline/`)
+11. **Extract steps** from existing scripts
+12. **Test orchestrator** (manual runs before scheduling)
+
+### Phase 4: Telegram Bot (Phased)
+
+13. **Bot foundation** (Activity 3.0): `/start`, basic commands, FSM setup
+14. **Digest delivery** (Activity 3.0): Send formatted messages to users
+15. **Inline buttons** (Activity 4.0): Discuss, Read, Save, 👍👎
+16. **Discussion agent** (Activity 5.0): Multi-turn conversations
+17. **Memory system** (Activity 6.0): Extract, store, surface user knowledge
+
+---
+
+## File Count Comparison
+
+| Layer | Current Files | Proposed Files | Change |
+|-------|---------------|----------------|--------|
+| Domain | 3 | 3 | Same (but expanded entities) |
+| Interfaces | 1 (529 lines) | 5 (~100 lines each) | Split for clarity |
+| Use Cases | 5 | 8 | +3 (delivery, discussion, memory) |
+| Repositories | 5 (JSONL only) | 11 (5 JSONL + 5 Postgres + 1 RocksDB) | +6 |
+| Services | 7 | 7 | Same |
+| Agents | 2 (in services/) | 4 (separate package) | +2 (discussion, memory), moved |
+| Pipeline | 1 (jobs/) | 3 (orchestrator, steps, reporting) | +2 |
+| Presentation | 6 (API only) | 14 (API + Bot) | +8 (bot handlers, keyboards, formatters) |
+| **Total** | ~30 files | ~55 files | +25 files (+83%) |
+
+**Analysis:** File count nearly doubles, but each file is more focused and easier to maintain. Total LOC may increase only 30-40% due to:
+- Splitting interfaces doesn't add code
+- Bot handlers are thin routing layers
+- Pipeline orchestrator replaces bash scripts
+
+---
+
+## Configuration Changes
+
+### Current `.env`:
 ```bash
-SECRET_KEY=your-secret-key-here
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-REDIS_URL=redis://localhost:6379
-DATA_DIR=../data
+SECRET_KEY=...
+OPENAI_API_KEY=...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHANNEL_ID=...
 ```
 
-### `/.env.example`
-**Purpose:** Template for `.env` (committed to git)
-
----
-
-## Docker Structure
-
-### `/Dockerfile`
-**Purpose:** Backend container image
-
-**Stages:**
-1. Base Python 3.11 image
-2. Install Poetry and dependencies
-3. Copy application code
-4. Set up non-root user
-5. Expose port 8000
-6. Run uvicorn server
-
-### `/docker-compose.yml`
-**Purpose:** Local development environment
-
-**Services:**
-- `backend` - FastAPI app (port 8000)
-- `redis` - Cache (port 6379)
-- `frontend` - Next.js app (port 3000) - Sprint 2+
-
----
-
-## Sprint 1 Files to Create
-
-**Backend Application:**
-```
-backend/app/main.py
-backend/app/config.py
-backend/app/api/auth.py
-backend/app/api/digests.py
-backend/app/models/user.py
-backend/app/models/digest.py
-backend/app/services/auth.py
-backend/app/services/hn_client.py
-backend/app/services/storage.py
-backend/app/jobs/collector.py
-backend/app/utils/jsonl.py
-backend/app/utils/cache.py
-```
-
-**Configuration:**
-```
-backend/pyproject.toml
-backend/.env.example
-docker-compose.yml
-Dockerfile
-```
-
-**Tests:**
-```
-backend/tests/test_auth.py
-backend/tests/test_digests.py
-backend/tests/test_collector.py
-```
-
-**Data Directories:**
-```
-data/raw/ (empty, files created by collector)
-data/users/ (empty, files created by API)
-```
-
----
-
-## Git Ignore Patterns
-
-```gitignore
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-.venv/
-env/
-ENV/
-
-# Poetry
-poetry.lock (optional - commit for reproducibility)
-
-# Data files
-data/
-!data/.gitkeep
-
-# Environment
-.env
-.env.local
-
-# Logs
-*.log
-.ai/debug-log.md
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Redis
-dump.rdb
-```
-
----
-
-## Directory Creation Script
-
+### Proposed `.env`:
 ```bash
-#!/bin/bash
-# scripts/setup.sh
+# Database
+DATABASE_URL=postgresql+asyncpg://user:pass@localhost/hn_pal
+REDIS_URL=redis://localhost:6379/0
 
-# Create backend structure
-mkdir -p backend/app/{api,models,services,jobs,utils}
-mkdir -p backend/tests
+# Storage backend (jsonl | postgres)
+STORAGE_BACKEND=postgres
+CONTENT_STORAGE=rocksdb  # or: filesystem
 
-# Create data directories
-mkdir -p data/{raw,processed,users}
+# OpenAI
+OPENAI_API_KEY=sk-proj-...
+OPENAI_MODEL=gpt-4o-mini
 
-# Create docs structure (already exists)
-mkdir -p docs/{architecture,epics,stories}
+# Telegram
+TELEGRAM_BOT_TOKEN=123456789:ABC...
+TELEGRAM_CHANNEL_ID=@your_channel  # (may deprecate for DM-only bot)
 
-# Create scripts directory
-mkdir -p scripts
+# Pipeline
+PIPELINE_SCHEDULE=0 7 * * *  # Daily at 7:00 AM UTC
 
-# Touch __init__.py files
-touch backend/app/__init__.py
-touch backend/app/api/__init__.py
-touch backend/app/models/__init__.py
-touch backend/app/services/__init__.py
-touch backend/app/jobs/__init__.py
-touch backend/app/utils/__init__.py
-touch backend/tests/__init__.py
-
-echo "Project structure created!"
+# Optional: Observability
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
 ```
 
 ---
 
-**Project Structure Owner:** Winston (Architect)
-**Last Review:** 2025-10-21
+## Docker Compose Updates
+
+Add PostgreSQL, Redis, and optional admin tools:
+
+```yaml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: hn_pal
+      POSTGRES_PASSWORD: hn_pal_dev
+      POSTGRES_DB: hn_pal
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Optional: PostgreSQL admin
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@hnpal.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+  # Optional: Redis admin
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+
+volumes:
+  postgres_data:
+  redis_data:
+  pgadmin_data:
+```
+
+---
+
+## Next Steps
+
+1. **Review this document** with the team
+2. **Prioritize phases** based on roadmap
+3. **Create implementation issues** for each phase
+4. **Start with Phase 0** (refactor without breaking changes)
+5. **Test dual backend support** (JSONL + Postgres) before full migration
+
+---
+
+## Related Documents
+
+- [spec.md](../spec.md) — Product requirements (Telegram bot vision)
+- [activities/README.md](../activities/README.md) — Implementation activities
+- [activities/activity-1.5-rocksdb-content-storage.md](../activities/activity-1.5-rocksdb-content-storage.md) — RocksDB design
+- [activities/activity-3.0-telegram-bot-foundation.md](../activities/activity-3.0-telegram-bot-foundation.md) — Bot architecture
+- [AGENTS.md](../../AGENTS.md) — Agent system documentation
