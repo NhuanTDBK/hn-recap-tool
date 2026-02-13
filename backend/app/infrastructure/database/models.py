@@ -120,10 +120,7 @@ class UserTokenUsage(Base):
     # Relationships
     user = relationship("User", back_populates="token_usage")
 
-    __table_args__ = (
-        # Unique constraint: one record per user/date/model
-        {"uniqueConstraints": [("user_id", "date", "model")]},
-    )
+    __table_args__ = ()
 
     def __repr__(self):
         return f"<UserTokenUsage(user_id={self.user_id}, date={self.date}, tokens={self.total_tokens})>"

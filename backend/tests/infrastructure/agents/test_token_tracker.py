@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from backend.app.infrastructure.agents.token_tracker import TokenTracker, PRICING
+from app.infrastructure.agents.token_tracker import TokenTracker, PRICING
 
 
 class TestTokenTracker:

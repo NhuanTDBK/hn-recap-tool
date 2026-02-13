@@ -2,7 +2,7 @@
 
 import pytest
 
-from backend.app.infrastructure.agents.summarization_agent import (
+from app.infrastructure.agents.summarization_agent import (
     SummaryOutput,
     create_summarization_agent,
 )
@@ -25,29 +25,33 @@ class TestSummarizationAgent:
         agent = create_summarization_agent(prompt_type="technical")
 
         assert agent.name == "SummarizationAgent"
-        assert hasattr(agent, "prompt_template")
-        assert len(agent.prompt_template) > 0
+        assert hasattr(agent, "instructions")
+        assert len(agent.instructions) > 0
+        assert "technical" in agent.instructions.lower()
 
     def test_create_business_agent(self):
         """Test creating business variant agent."""
         agent = create_summarization_agent(prompt_type="business")
 
         assert agent.name == "SummarizationAgent"
-        assert hasattr(agent, "prompt_template")
+        assert hasattr(agent, "instructions")
+        assert "business" in agent.instructions.lower() or "market" in agent.instructions.lower()
 
     def test_create_concise_agent(self):
         """Test creating concise variant agent."""
         agent = create_summarization_agent(prompt_type="concise")
 
         assert agent.name == "SummarizationAgent"
-        assert hasattr(agent, "prompt_template")
+        assert hasattr(agent, "instructions")
+        assert len(agent.instructions) > 0
 
     def test_create_personalized_agent(self):
         """Test creating personalized variant agent."""
         agent = create_summarization_agent(prompt_type="personalized")
 
         assert agent.name == "SummarizationAgent"
-        assert hasattr(agent, "prompt_template")
+        assert hasattr(agent, "instructions")
+        assert len(agent.instructions) > 0
 
     def test_create_agent_with_custom_model(self):
         """Test creating agent with custom model."""
@@ -60,9 +64,13 @@ class TestSummarizationAgent:
     def test_create_agent_fallback_to_basic(self):
         """Test creation falls back to basic if variant not found."""
         # This will try to load 'nonexistent' and fallback to 'basic'
-        # Skip this test if we implement stricter error handling
-        with pytest.raises(FileNotFoundError):
-            create_summarization_agent(prompt_type="nonexistent")
+        agent = create_summarization_agent(prompt_type="nonexistent")
+
+        # Should fallback to basic
+        assert agent.name == "SummarizationAgent"
+        assert hasattr(agent, "instructions")
+        # Instructions should be from basic prompt
+        assert len(agent.instructions) > 0
 
     def test_summary_output_model(self):
         """Test SummaryOutput Pydantic model."""
