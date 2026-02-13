@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, List
 from datetime import datetime
 
-from backend.app.domain.entities import User, Post, Comment, Digest
+from app.domain.entities import User, Post, Comment, Digest
 
 
 # Repository Interfaces (Data Access)

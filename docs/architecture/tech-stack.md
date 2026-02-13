@@ -1,8 +1,8 @@
 # Tech Stack
 
-**Project:** HackerNews Knowledge Graph Builder
-**Version:** 1.0 (Sprint 1 - MVP)
-**Last Updated:** 2025-10-21
+**Project:** HN Pal - Intelligent HackerNews Telegram Bot
+**Version:** 2.0 (Multi-Phase Implementation)
+**Last Updated:** 2026-02-13
 
 ---
 
@@ -12,62 +12,78 @@
 
 **Language & Runtime:**
 - **Python 3.11+** - Primary language
-- **Reason:** Modern async support, type hints, excellent library ecosystem
+- **Reason:** Modern async support, type hints, excellent library ecosystem, strong LLM integration
 
-**Web Framework:**
-- **FastAPI 0.100+** - Async web framework
-- **Reason:** High performance, auto-generated OpenAPI docs, native async support, type safety
+**Bot Framework:**
+- **aiogram 3.x** - Async Telegram bot framework  
+- **Reason:** Native async/await, built-in FSM for state management, clean middleware, active development
 
 **Task Scheduling:**
 - **APScheduler 3.10+** - Background job scheduling
-- **Reason:** Simple, Pythonic, supports cron-like scheduling
+- **Reason:** Simple, Pythonic, supports cron-like scheduling, async support
 
 ### Data Storage
 
-**Primary Storage:**
-- **JSONL Files** - Newline-delimited JSON
-- **Location:** `data/` directory with date partitioning
-- **Compression:** gzip for article content (`.jsonl.gz`)
-- **Reason:** Simple, human-readable, no database overhead for MVP
+**Metadata Storage:**
+- **PostgreSQL 14+** - Relational database
+- **Use Cases:** Posts, users, conversations, summaries, token tracking 
+- **ORM:** SQLAlchemy 2.x with Alembic migrations
+- **Reason:** ACID transactions, structured queries, production-ready
 
-**Cache:**
+**Content Storage:**
+- **RocksDB** - Embedded key-value database
+- **Use Cases:** HTML, text, and markdown content (large blobs)
+- **Compression:** Zstandard built-in (~70% space savings)
+- **Reason:** LSM tree optimized for write-heavy workloads, no filesystem overhead
+
+**State Management:**
 - **Redis 7.0+** - In-memory data store
-- **Use Cases:** User sessions, latest digests, frequently accessed data
-- **Reason:** Fast key-value access, supports TTL, simple to deploy
+- **Use Cases:** Telegram bot FSM state, user sessions, caching
+- **Reason:** Fast key-value access, supports TTL, FSM storage for aiogram
 
 ### External APIs
 
 **HackerNews:**
-- **HN Algolia API** - `http://hn.algolia.com/api/v1`
-- **Rate Limit:** 10,000 requests/day
-- **Endpoints:** `/search`, `/items/:id`
+- **Current:** HN Algolia API - `http://hn.algolia.com/api/v1`
+- **Recommended:** Firebase API - `/v0/maxitem` + `/v0/item/{id}`
+- **Migration:** Incremental ID scanning for efficient polling
+- **Rate Limit:** No documented limits for Firebase API
 
 **Content Extraction:**
-- **trafilatura 1.6+** - Article content extraction
-- **Reason:** Best-in-class article extraction, handles paywalls/JS sites
+- **trafilatura 1.6+** - Article text extraction  
+- **markitdown** - HTML to Markdown conversion
+- **User-Agent Rotation** - 11+ browser agents to avoid blocking
+- **Reason:** Best-in-class extraction, handles paywalls/JS sites
 
 **LLM Provider:**
-- **Anthropic Claude API** or **OpenAI GPT-4 API**
-- **Cost Budget:** ~$2-3/day for MVP (30 posts)
+- **OpenAI Agents SDK** - Agent orchestration framework
+- **Models:** GPT-4o-mini (cost-effective), GPT-4o (advanced)
+- **Observability:** Langfuse integration for tracing
+- **Cost Budget:** ~$2-5/day for 200 posts + conversations
 
-**Email Service:**
-- **SendGrid** or **Postmark** - Email delivery
-- **Reason:** High deliverability, simple API, free tier available
+**Telegram Bot:**
+- **Telegram Bot API** - Official bot platform
+- **Deployment:** Polling (dev) → Webhook (prod on Vercel)
+- **Rate Limits:** 30 messages/second, managed by aiogram
 
-### Frontend
+### AI Agents
 
-**Framework:**
-- **Next.js 14+** - React framework
-- **Reason:** SSR/SSG support, API routes, good DX
+**Agent Framework:**
+- **OpenAI Agents SDK** - Multi-agent orchestration
+- **Structured Outputs:** Pydantic models for type safety
+- **Tool Calling:** Database queries, web search, memory access
+- **Reason:** Native agent abstractions, multi-turn conversations, context management
 
-**Styling:**
-- **Tailwind CSS 3.4+** - Utility-first CSS
-- **Reason:** Fast development, mobile-first, small bundle
+**Agent Types:**
+- **SummarizationAgent:** Generate article summaries (Phase 2)
+- **DiscussionAgent:** Facilitate conversations about posts (Phase 5) 
+- **MemoryAgent:** Personalized interactions with user context (Phase 6)
+- **QAAgent:** Answer questions with database tools (Phase 3+)
 
-**State Management:**
-- **React Context + Hooks** - Built-in state
-- **SWR** - Data fetching and caching
-- **Reason:** Simple, no additional dependencies for MVP
+**Observability:**
+- **Langfuse** - LLM call tracing and analytics
+- **Token Tracking:** Per-user usage for cost monitoring
+- **Performance Metrics:** Agent response times, success rates
 
 ---
 
@@ -76,34 +92,28 @@
 ### Package Management
 
 **Backend:**
-- **Poetry 1.7+** - Python dependency management
-- **pyproject.toml** - Configuration file
-- **Reason:** Modern Python packaging, lock files, virtual env management
-
-**Frontend:**
-- **npm** or **pnpm** - Node package manager
-- **package.json** - Configuration file
+- **uv** - Fast Python package manager
+- **pyproject.toml** - Configuration file  
+- **uv.lock** - Lockfile for reproducible builds
+- **Reason:** Faster than pip/poetry, excellent dependency resolution
 
 ### Code Quality
 
 **Linting & Formatting:**
-- **Black** - Code formatter (Python)
-- **Ruff** - Fast Python linter
-- **Reason:** Industry standard, fast, minimal config
+- **Ruff** - Fast Python linter and formatter
+- **Reason:** Combines linting + formatting in one fast tool, replacing Black
 
 **Type Checking:**
-- **mypy** - Static type checker (optional for MVP)
+- **mypy** - Static type checker
+- **Reason:** Catch type errors early, improve code reliability
 
 ### Testing
 
 **Backend:**
 - **pytest** - Testing framework
-- **pytest-asyncio** - Async test support
+- **pytest-asyncio** - Async test support  
 - **httpx** - HTTP client for API testing
-
-**Frontend:**
-- **Jest** - Testing framework
-- **React Testing Library** - Component testing
+- **Bot Testing:** aiogram test utilities for bot handlers
 
 ### Version Control
 
@@ -115,187 +125,253 @@
 
 ## Infrastructure & Deployment
 
-### MVP Deployment
+### Local Development
 
-**Hosting:**
-- **Docker Container** on any cloud VM
-- **Options:** AWS EC2, DigitalOcean Droplet, Render, Railway
-- **Reason:** Simple, portable, cost-effective
+**Database Services:**
+- **Docker Compose** - PostgreSQL + Redis containers
+- **Port Mapping:** PostgreSQL:5432, Redis:6379 
+- **Data Volumes:** Persistent storage across restarts
 
-**Container:**
-- **Docker** - Containerization
-- **Docker Compose** - Local development + simple production
+**Bot Development:**
+- **Polling Mode** - Long-polling for local testing
+- **Environment:** `.env` files with API keys
+- **Hot Reload:** File watching for development
 
-**Environment Management:**
-- **.env files** - Configuration
-- **python-dotenv** - Load env vars
+### Production Deployment (Future)
 
-### Monitoring (Minimal for MVP)
+**Platform:**
+- **Vercel** - Serverless functions for webhooks
+- **Webhook Endpoint:** `/api/telegram-webhook`
+- **Reason:** Zero-config deployment, automatic scaling
 
-**Logging:**
-- **Python logging** module to stdout
-- **Docker logs** for collection
+**Database:**
+- **Supabase** - Managed PostgreSQL with APIs
+- **Redis:** Upstash or Redis Cloud (managed)
+- **RocksDB:** Local storage on Vercel filesystem
 
-**Error Tracking:**
-- **Manual log review** for MVP
-- **Future:** Sentry or similar
+**Monitoring:**
+- **Vercel Analytics** - Function performance
+- **Langfuse** - LLM observability
+- **Bot Logs:** Structured logging to stdout
 
 ---
 
-## Library Dependencies (Sprint 1)
+## Library Dependencies (Current Implementation)
 
-### Backend Core
+### Core Backend
 
 ```toml
-# pyproject.toml (Poetry)
-[tool.poetry.dependencies]
-python = "^3.11"
-fastapi = "^0.100.0"
-uvicorn = {extras = ["standard"], version = "^0.23.0"}
-python-dotenv = "^1.0.0"
-pydantic = "^2.0.0"
-pydantic-settings = "^2.0.0"
+# pyproject.toml (uv)
+[project]
+name = "hn-pal"
+version = "2.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    # Core Framework
+    "aiogram>=3.0.0",           # Telegram bot framework
+    "pydantic>=2.0.0",          # Data validation
+    "pydantic-settings>=2.0.0", # Settings management
+    
+    # Database & Storage
+    "sqlalchemy>=2.0.0",        # Database ORM
+    "alembic>=1.13.0",          # Database migrations
+    "psycopg2-binary>=2.9.0",   # PostgreSQL driver
+    "python-rocksdb>=0.8.0",    # Content storage
+    "redis>=5.0.0",             # State management
+    
+    # HTTP & Content Processing
+    "httpx>=0.24.0",            # Async HTTP client
+    "trafilatura>=1.6.0",       # Article extraction
+    "markitdown>=0.1.0",        # HTML to Markdown
+    
+    # AI & LLM
+    "openai-agents",             # Agent framework
+    "langfuse>=2.0.0",          # LLM observability
+    "tiktoken>=0.5.0",          # Token counting
+    
+    # Task Scheduling
+    "apscheduler>=3.10.0",      # Background jobs
+    
+    # Utilities
+    "python-dotenv>=1.0.0",     # Environment variables
+]
 
-# Authentication
-python-jose = {extras = ["cryptography"], version = "^3.3.0"}
-passlib = {extras = ["bcrypt"], version = "^1.7.4"}
-python-multipart = "^0.0.6"
-
-# HTTP Client
-httpx = "^0.24.0"
-
-# Data Processing
-trafilatura = "^1.6.0"
-
-# Task Scheduling
-apscheduler = "^3.10.0"
-
-# Caching
-redis = "^5.0.0"
-
-# Utilities
-tiktoken = "^0.5.0"  # Token counting
-
-[tool.poetry.dev-dependencies]
-pytest = "^7.4.0"
-pytest-asyncio = "^0.21.0"
-black = "^23.7.0"
-ruff = "^0.0.280"
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0", 
+    "ruff>=0.1.0",              # Linting + formatting
+    "mypy>=1.8.0",              # Type checking
+]
 ```
-
-### Frontend Core
-
-```json
-// package.json
-{
-  "dependencies": {
-    "next": "^14.0.0",
-    "react": "^18.0.0",
-    "react-dom": "^18.0.0",
-    "swr": "^2.2.0",
-    "tailwindcss": "^3.4.0"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/react": "^18.0.0",
-    "typescript": "^5.0.0"
-  }
-}
-```
-
 ---
 
 ## API Keys & Configuration
 
-**Required Environment Variables (Sprint 1):**
+**Required Environment Variables:**
 
 ```bash
 # Backend (.env)
-SECRET_KEY=<random-secret-for-jwt>
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
 
-# HN API (no key required - public)
+# Database
+DATABASE_URL=postgresql+asyncpg://user:pass@localhost/hn_pal
+REDIS_URL=redis://localhost:6379/0
 
-# Redis
-REDIS_URL=redis://localhost:6379
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=123456789:ABC...
 
-# Email (for Sprint 2)
-# SENDGRID_API_KEY=<key>
-# FROM_EMAIL=noreply@yourapp.com
+# LLM API
+OPENAI_API_KEY=sk-proj-...
+# Alternative: ANTHROPIC_API_KEY=sk-ant-...
 
-# LLM API (for Sprint 2)
-# ANTHROPIC_API_KEY=<key>
-# or
-# OPENAI_API_KEY=<key>
+# Observability
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com
+
+# Application
+ENVIRONMENT=development  # or production
+DEBUG=true
+LOG_LEVEL=INFO
 ```
 
 ---
 
-## File Size & Performance Targets
+## Data Storage & Performance
 
-**Data Storage Estimates:**
-- Raw posts: ~50 KB/day (30 posts × ~2 KB)
-- Compressed content: ~200 KB/day (30 posts × ~10 KB compressed)
-- Comments: ~100 KB/day
-- **Total:** ~350 KB/day = ~130 MB/year
+**Storage Estimates (with RocksDB compression):**
 
-**API Performance:**
-- Endpoint response time: < 2 seconds
-- Digest processing: < 30 minutes total
-- Email delivery: < 5 seconds per user
+- Raw posts metadata: ~50 KB/day (200 posts × ~250 bytes)
+- Compressed content (RocksDB): ~600 KB/day (200 posts × ~3 KB compressed)
+- Summaries: ~100 KB/day (200 posts × ~500 bytes)
+- User data & conversations: ~50 KB/day
+- **Daily Total:** ~800 KB/day = ~300 MB/year
+- **10-year projection:** ~3 GB (very manageable)
 
-**Redis Memory:**
-- User sessions: ~1 KB/user
-- Latest digest cache: ~500 KB
-- **Total:** < 10 MB for 100 users
+**Performance Targets:**
+
+- HN API polling: < 30 seconds for 200 posts
+- Content crawling: < 5 minutes (3 concurrent workers)
+- Summarization: < 10 minutes (sequential processing)
+- Bot response time: < 3 seconds for simple queries
+- Discussion agent: < 10 seconds for context loading
+
+**RocksDB Benefits:**
+
+- 70% space savings vs uncompressed files
+- No filesystem inode overhead (730K inodes → ~20 SST files)
+- O(1) key-value access by HN ID
+- Built-in compression and compaction
 
 ---
 
-## Security Considerations
+## Architecture Phases
 
-**Authentication:**
-- JWT tokens with bcrypt password hashing
-- HTTPS required in production
-- No password reset (manual admin support for MVP)
+### Phase 1: Ingest Pipeline (✅ Completed)
 
-**API Security:**
-- CORS configured for frontend domain
-- Rate limiting per user
+**Technologies:**
+- HN API polling with APScheduler
+- Content extraction with trafilatura + markitdown
+- RocksDB for content storage
+- PostgreSQL for metadata
+- Pipeline orchestration
+
+### Phase 2: Summarization (⏳ In Progress)
+
+**Technologies:**
+- OpenAI Agents SDK for summarization
+- Prompt engineering with LLM-as-judge evaluation
+- Langfuse observability integration
+- Batch processing optimization
+
+### Phase 3: Bot Foundation (📝 Ready)
+
+**Technologies:**
+- aiogram 3.x Telegram bot framework
+- FSM state management (IDLE ↔ DISCUSSION)
+- Redis for bot state persistence
+- Inline buttons for user interactions
+
+### Phase 4: Interactive Elements (📝 Ready)
+
+**Technologies:**
+- Callback routing for button actions
+- Bookmark system integration
+- Interest tracking via reactions
+- UI feedback and polish
+
+### Phase 5: Discussion System (📝 Ready)
+
+**Technologies:**
+- DiscussionAgent with context loading
+- Multi-turn conversation management
+- 30-minute timeout handling
+- Conversation persistence
+
+### Phase 6: Memory System (📝 Ready)
+
+**Technologies:**
+- Memory extraction agents
+- Two-tier storage (MEMORY.md + daily notes)
+- BM25 full-text search
+- Personalized context injection
+
+**Legend:** ✅ Completed, ⏳ In Progress, 📝 Documented
+
+---
+
+## Security & Privacy
+
+**Bot Security:**
+
+- Telegram webhook validation
+- Rate limiting per user (aiogram middleware)
 - Input validation via Pydantic
+- Environment variable separation
 
 **Data Privacy:**
-- User data stored locally (JSONL files)
-- No third-party analytics for MVP
-- Comments paraphrased (no direct quotes)
+
+- User data stored locally (PostgreSQL + RocksDB)
+- No third-party analytics or tracking
+- User memory can be cleared on request
+- Conversation data encrypted at rest
+
+**API Security:**
+
+- HTTPS required in production
+- API keys in environment variables only
+- LLM API call logging for audit trails
 
 ---
 
-## Sprint 1 Scope
+## Migration Strategy
 
-**What We're Building:**
-- Python FastAPI backend with JWT auth
-- HN data collection job (posts, content, comments)
-- JSONL file storage with gzip compression
-- Basic API endpoints for data access
-- Redis caching
+### From MVP to Production
 
-**What We're NOT Building (Yet):**
-- LLM integration (Sprint 2)
-- Frontend UI (Sprint 2)
-- Email delivery (Sprint 2)
-- Personalization (Sprint 3)
-- Comment insights (Sprint 4)
+**Current (File-based MVP):**
+
+- JSONL files for posts
+- Filesystem for content
+- APScheduler in-process
+
+**Target (Database-backed Production):**
+
+- PostgreSQL for structured data
+- RocksDB for content blobs
+- Vercel serverless for bot hosting
+
+**Migration Steps:**
+
+1. Add PostgreSQL schema (Activity 1.1)
+2. Implement RocksDB storage (Activity 1.5) 
+3. Unified pipeline orchestrator (Activity 1.7)
+4. Deploy Telegram bot (Activity 3.0)
+5. Add conversation features (Activities 4.0-6.0)
+
+**Timeline:** Phases can be implemented incrementally without breaking changes.
 
 ---
 
-## Next Steps
-
-After Sprint 1:
-- Add LLM integration (Sprint 2)
-- Build Next.js frontend (Sprint 2)
-- Add email delivery (Sprint 2)
-- Implement personalization (Sprint 3)
-
-**Tech Stack Owner:** Winston (Architect)
-**Last Review:** 2025-10-21
+**Tech Stack Owner:** Development Team  
+**Last Review:** 2026-02-13  
+**Next Review:** Monthly during active development

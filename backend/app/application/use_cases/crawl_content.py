@@ -5,9 +5,13 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
-from app.domain.entities import Post
-from app.infrastructure.services.enhanced_content_extractor import EnhancedContentExtractor
-from app.infrastructure.services.crawl_status_tracker import CrawlStatusTracker
+from markitdown import MarkItDown
+
+from backend.app.domain.entities import Post
+from backend.app.infrastructure.services.enhanced_content_extractor import (
+    EnhancedContentExtractor,
+)
+from backend.app.infrastructure.services.crawl_status_tracker import CrawlStatusTracker
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +24,7 @@ class CrawlContentUseCase:
         extractor: EnhancedContentExtractor,
         tracker: CrawlStatusTracker,
         output_dir: str = "data/content",
-        max_concurrent: int = 3
+        max_concurrent: int = 3,
     ):
         """Initialize crawl content use case.
 
@@ -37,15 +41,15 @@ class CrawlContentUseCase:
 
         self.html_dir = self.output_dir / "html"
         self.text_dir = self.output_dir / "text"
+        self.markdown_dir = self.output_dir / "markdown"
         self.html_dir.mkdir(parents=True, exist_ok=True)
         self.text_dir.mkdir(parents=True, exist_ok=True)
+        self.markdown_dir.mkdir(parents=True, exist_ok=True)
 
         self.semaphore = asyncio.Semaphore(max_concurrent)
 
     async def crawl_post(
-        self,
-        post: Post,
-        skip_if_crawled: bool = False
+        self, post: Post, skip_if_crawled: bool = False
     ) -> Tuple[bool, Dict[str, Any]]:
         """Crawl and extract content from a single post.
 
@@ -63,11 +67,7 @@ class CrawlContentUseCase:
         # Check if it's a text post (no URL)
         if not post.has_external_url():
             logger.info(f"Skipping text post: {post_id} - {title}")
-            return False, {
-                "post_id": post_id,
-                "skipped": True,
-                "reason": "no_url"
-            }
+            return False, {"post_id": post_id, "skipped": True, "reason": "no_url"}
 
         # Check if already crawled
         if skip_if_crawled and self.tracker.is_already_crawled(post_id):
@@ -75,7 +75,7 @@ class CrawlContentUseCase:
             return False, {
                 "post_id": post_id,
                 "skipped": True,
-                "reason": "already_crawled"
+                "reason": "already_crawled",
             }
 
         # Use semaphore for rate limiting
@@ -85,13 +85,15 @@ class CrawlContentUseCase:
 
             try:
                 # Extract content
-                success, html_content, extracted_text = await self.extractor.extract_content(url)
+                success, html_content, extracted_text = (
+                    await self.extractor.extract_content(url)
+                )
 
                 # Save HTML content if available
                 html_file = None
                 if html_content:
                     html_file = self.html_dir / f"{post_id}.html"
-                    with open(html_file, 'w', encoding='utf-8') as f:
+                    with open(html_file, "w", encoding="utf-8") as f:
                         f.write(html_content)
                     logger.info(f"✓ Saved HTML: {html_file}")
 
@@ -100,10 +102,29 @@ class CrawlContentUseCase:
                 content_length = 0
                 if extracted_text:
                     text_file = self.text_dir / f"{post_id}.txt"
-                    with open(text_file, 'w', encoding='utf-8') as f:
+                    with open(text_file, "w", encoding="utf-8") as f:
                         f.write(extracted_text)
                     content_length = len(extracted_text)
-                    logger.info(f"✓ Saved extracted text ({content_length} chars): {text_file}")
+                    logger.info(
+                        f"✓ Saved extracted text ({content_length} chars): {text_file}"
+                    )
+
+                # Convert HTML to Markdown
+                markdown_file = None
+                if html_content:
+                    try:
+                        md = MarkItDown()
+                        # Save HTML to temp file for conversion
+                        temp_html = self.html_dir / f"{post_id}.html"
+                        result = md.convert(str(temp_html))
+                        markdown_content = result.text_content
+
+                        markdown_file = self.markdown_dir / f"{post_id}.md"
+                        with open(markdown_file, "w", encoding="utf-8") as f:
+                            f.write(markdown_content)
+                        logger.info(f"✓ Saved markdown: {markdown_file}")
+                    except Exception as e:
+                        logger.warning(f"Failed to convert to markdown: {e}")
 
                 # Record status
                 self.tracker.record_crawl(
@@ -118,8 +139,9 @@ class CrawlContentUseCase:
                         "author": post.author,
                         "points": post.points,
                         "html_saved": html_file is not None,
-                        "text_saved": text_file is not None
-                    }
+                        "text_saved": text_file is not None,
+                        "markdown_saved": markdown_file is not None,
+                    },
                 )
 
                 return success, {
@@ -127,7 +149,7 @@ class CrawlContentUseCase:
                     "success": success,
                     "has_content": extracted_text is not None,
                     "content_length": content_length,
-                    "skipped": False
+                    "skipped": False,
                 }
 
             except Exception as e:
@@ -139,20 +161,18 @@ class CrawlContentUseCase:
                     url=url,
                     success=False,
                     has_content=False,
-                    error=str(e)
+                    error=str(e),
                 )
 
                 return False, {
                     "post_id": post_id,
                     "success": False,
                     "error": str(e),
-                    "skipped": False
+                    "skipped": False,
                 }
 
     async def crawl_posts(
-        self,
-        posts: List[Post],
-        skip_if_crawled: bool = False
+        self, posts: List[Post], skip_if_crawled: bool = False
     ) -> Dict[str, Any]:
         """Crawl multiple posts concurrently.
 
@@ -167,7 +187,9 @@ class CrawlContentUseCase:
         logger.info(f"Max concurrent requests: {self.semaphore._value}")
 
         # Create tasks for all posts
-        tasks = [self.crawl_post(post, skip_if_crawled=skip_if_crawled) for post in posts]
+        tasks = [
+            self.crawl_post(post, skip_if_crawled=skip_if_crawled) for post in posts
+        ]
 
         # Run all tasks
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -179,7 +201,7 @@ class CrawlContentUseCase:
             "failed": 0,
             "skipped": 0,
             "with_content": 0,
-            "without_content": 0
+            "without_content": 0,
         }
 
         for result in results:

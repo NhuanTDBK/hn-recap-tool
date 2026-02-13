@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """Script to push HackerNews digest to Telegram channel.
 
 This script reads summaries from JSONL file and sends each summary as a separate message
@@ -66,7 +67,7 @@ class TelegramDigestPusher:
 
         try:
             summaries = []
-            with open(jsonl_file, 'r', encoding='utf-8') as f:
+            with open(jsonl_file, "r", encoding="utf-8") as f:
                 for line in f:
                     if not line.strip():
                         continue
@@ -84,7 +85,11 @@ class TelegramDigestPusher:
                 url = summary.get("url", "")
 
                 # Create HackerNews link from article ID
-                hn_link = f"https://news.ycombinator.com/item?id={article_id}" if article_id else ""
+                hn_link = (
+                    f"https://news.ycombinator.com/item?id={article_id}"
+                    if article_id
+                    else ""
+                )
 
                 # Format message with article link and external URL
                 message_parts = [f"*{title}*"]
@@ -112,14 +117,13 @@ class TelegramDigestPusher:
                 if not await self._send_message(message):
                     all_sent = False
                 else:
-                    await asyncio.sleep(0.5)  # Rate limiting between messages
+                    await asyncio.sleep(2)  # Rate limiting between messages
 
             return all_sent
 
         except Exception as e:
             logger.error(f"Error sending JSONL file: {e}")
             return False
-
 
     async def _send_message(self, message: str) -> bool:
         """Send message to Telegram.
@@ -156,7 +160,9 @@ class TelegramDigestPusher:
                 else:
                     logger.error(f"Failed to send: HTTP {response.status_code}")
                     logger.error(f"Response: {response.text}")
-                    logger.error("Debug: Ensure bot is added to the chat and channel_id is correct")
+                    logger.error(
+                        "Debug: Ensure bot is added to the chat and channel_id is correct"
+                    )
                     return False
 
         except Exception as e:

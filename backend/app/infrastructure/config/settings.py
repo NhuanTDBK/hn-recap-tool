@@ -10,15 +10,23 @@ from typing import Optional
 class Settings(BaseSettings):
     """Application settings loaded from environment."""
 
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="allow",
+    )
     # Application
     app_name: str = "HackerNews Digest"
     app_version: str = "1.0.0"
     debug: bool = False
 
     # Security
-    secret_key: str
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+
+    # Database
+    database_url: str = "postgresql+asyncpg://hn_pal:hn_pal_dev@localhost:5433/hn_pal"
 
     # Redis
     redis_url: str = "redis://localhost:6379"
@@ -51,12 +59,6 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False
-    )
 
 
 # Global settings instance

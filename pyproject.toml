@@ -8,8 +8,11 @@ dependencies = [
     "aiofiles>=25.1.0",
     "email-validator>=2.3.0",
     "httpx>=0.28.1",
+    "langfuse>=3.14.1",
+    "openai>=2.6.1",
     "openai-agents>=0.4.2",
     "pydantic>=2.12.3",
     "ruff>=0.14.2",
+    "tiktoken>=0.12.0",
     "trafilatura>=2.0.0",
 ]
