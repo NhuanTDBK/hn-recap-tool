@@ -167,3 +167,47 @@ class AgentCall(Base):
 
     def __repr__(self):
         return f"<AgentCall(agent={self.agent_name}, operation={self.operation}, status={self.status})>"
+
+
+class Summary(Base):
+    """Personalized summaries for posts - supports different users and prompt types."""
+
+    __tablename__ = "summaries"
+
+    # Primary key
+    id = Column(Integer, primary_key=True)
+
+    # Foreign keys
+    post_id = Column(UUID(as_uuid=True), ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)  # NULL = default/shared summary
+
+    # Summary details
+    prompt_type = Column(String(50), nullable=False, index=True)  # basic, technical, business, concise, personalized
+    summary_text = Column(Text, nullable=False)  # The actual summary content
+    key_points = Column(JSON, default=list)  # Extracted key points if structured output used
+    technical_level = Column(String(50))  # beginner, intermediate, advanced
+
+    # Cost tracking
+    token_count = Column(Integer)  # Total tokens used for this summary
+    cost_usd = Column(Numeric(10, 6))  # Cost of generation
+
+    # User feedback for improvement
+    rating = Column(Integer)  # 1-5 star rating from user
+    user_feedback = Column(Text)  # User feedback text
+
+    # Timestamps
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False, index=True)
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relationships
+    post = relationship("Post")
+    user = relationship("User")
+
+    __table_args__ = (
+        # Unique constraint: one summary per post/user/prompt_type combo
+        # Allows multiple prompt types per user, and shared summaries (user_id=NULL)
+    )
+
+    def __repr__(self):
+        user_str = f"user_{self.user_id}" if self.user_id else "shared"
+        return f"<Summary(post_id={self.post_id}, {user_str}, {self.prompt_type})>"
