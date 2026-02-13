@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import UUID
 
 
 # revision identifiers, used by Alembic.
@@ -23,7 +24,7 @@ def upgrade() -> None:
     op.create_table(
         "summaries",
         sa.Column("id", sa.Integer(), nullable=False),
-        sa.Column("post_id", sa.UUID(), nullable=False),
+        sa.Column("post_id", UUID(as_uuid=True), nullable=False),
         sa.Column("user_id", sa.Integer(), nullable=True),  # NULL = default summary
         sa.Column("prompt_type", sa.String(50), nullable=False),  # basic, technical, business, etc.
         sa.Column("summary_text", sa.Text(), nullable=False),
