@@ -82,6 +82,11 @@ class User(Base):
     memory_enabled = Column(Boolean, default=True)
     status = Column(String(50), default="active")  # active, paused, blocked
     delivery_style = Column(String(50), default="flat_scroll")  # flat_scroll, brief
+    summary_preferences = Column(
+        JSON,
+        nullable=False,
+        default={"style": "basic", "detail_level": "medium", "technical_depth": "intermediate"}
+    )  # Summary style configuration
 
     # Delivery tracking
     last_delivered_at = Column(TIMESTAMP(timezone=True), nullable=True)  # When user last received digest
@@ -91,10 +96,30 @@ class User(Base):
     updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     # Relationships
+    summaries = relationship("Summary", back_populates="user", cascade="all, delete-orphan")
     token_usage = relationship("UserTokenUsage", back_populates="user", cascade="all, delete-orphan")
     agent_calls = relationship("AgentCall", back_populates="user", cascade="all, delete-orphan")
     deliveries = relationship("Delivery", back_populates="user", cascade="all, delete-orphan")
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
+
+    def get_summary_style(self) -> str:
+        """Get the user's preferred summary style."""
+        if self.summary_preferences and isinstance(self.summary_preferences, dict):
+            return self.summary_preferences.get("style", "basic")
+        return "basic"
+
+    def update_summary_preferences(self, **kwargs) -> None:
+        """Update summary preferences with new values."""
+        if not self.summary_preferences:
+            self.summary_preferences = {
+                "style": "basic",
+                "detail_level": "medium",
+                "technical_depth": "intermediate"
+            }
+
+        # Update with provided kwargs
+        for key, value in kwargs.items():
+            self.summary_preferences[key] = value
 
     def __repr__(self):
         return f"<User(telegram_id={self.telegram_id}, username='{self.username}')>"
@@ -182,7 +207,7 @@ class Summary(Base):
 
     # Foreign keys
     post_id = Column(UUID(as_uuid=True), ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)  # NULL = default/shared summary
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)  # Required for personalization
 
     # Summary details
     prompt_type = Column(String(50), nullable=False, index=True)  # basic, technical, business, concise, personalized
@@ -208,12 +233,11 @@ class Summary(Base):
 
     __table_args__ = (
         # Unique constraint: one summary per post/user/prompt_type combo
-        # Allows multiple prompt types per user, and shared summaries (user_id=NULL)
+        # Prevents duplicate summaries for same post/user/type
     )
 
     def __repr__(self):
-        user_str = f"user_{self.user_id}" if self.user_id else "shared"
-        return f"<Summary(post_id={self.post_id}, {user_str}, {self.prompt_type})>"
+        return f"<Summary(post_id={self.post_id}, user_{self.user_id}, {self.prompt_type})>"
 
 
 class Delivery(Base):
