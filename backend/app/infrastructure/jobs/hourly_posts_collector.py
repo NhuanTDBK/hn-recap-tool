@@ -91,20 +91,24 @@ class HourlyPostsCollectorJob:
                 logger.warning("No stories fetched from HN")
                 return self.stats
 
-            # Step 2: Convert to domain entities and filter duplicates
-            logger.info("Step 2: Processing and filtering stories")
+            # Step 2: Check existing IDs in batch and filter duplicates
+            logger.info("Step 2: Checking existing posts in batch")
+            story_ids = [int(s["id"]) for s in stories if s.get("id")]
+            existing_ids = await self.post_repository.find_existing_hn_ids(story_ids)
+            self.stats["duplicates_skipped"] = len(existing_ids)
+            logger.info(f"Found {len(existing_ids)} existing posts to skip")
+
+            # Step 3: Convert non-duplicate stories to domain entities
+            logger.info("Step 3: Processing new stories")
             posts_to_save = []
             for story in stories:
                 try:
-                    post = self._transform_story_to_post(story)
-
-                    # Check if post already exists
-                    existing = await self.post_repository.find_by_hn_id(int(story["id"]))
-                    if existing:
-                        self.stats["duplicates_skipped"] += 1
-                        logger.debug(f"Post {story['id']} already exists, skipping")
+                    story_id = int(story["id"])
+                    if story_id in existing_ids:
+                        logger.debug(f"Post {story_id} already exists, skipping")
                         continue
 
+                    post = self._transform_story_to_post(story)
                     posts_to_save.append(post)
                 except Exception as e:
                     logger.warning(f"Failed to process story {story.get('id')}: {e}")
@@ -117,8 +121,8 @@ class HourlyPostsCollectorJob:
                 logger.info("No new posts to save")
                 return self.stats
 
-            # Step 3: Save posts to PostgreSQL in batch
-            logger.info("Step 3: Saving posts to PostgreSQL")
+            # Step 4: Save posts to PostgreSQL in batch
+            logger.info("Step 4: Saving posts to PostgreSQL")
             try:
                 saved_posts = await self.post_repository.save_batch(posts_to_save)
                 self.stats["posts_saved"] = len(saved_posts)
@@ -128,8 +132,8 @@ class HourlyPostsCollectorJob:
                 self.stats["errors"] += 1
                 return self.stats
 
-            # Step 4: Cache post metadata in RocksDB
-            logger.info("Step 4: Caching post metadata in RocksDB")
+            # Step 5: Cache post metadata in RocksDB
+            logger.info("Step 5: Caching post metadata in RocksDB")
             for post in saved_posts:
                 try:
                     await self._cache_post_metadata(post)

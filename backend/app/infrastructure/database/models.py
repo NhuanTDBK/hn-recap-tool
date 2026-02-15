@@ -81,6 +81,10 @@ class User(Base):
     interests = Column(JSON, default=list)  # List of interest topics
     memory_enabled = Column(Boolean, default=True)
     status = Column(String(50), default="active")  # active, paused, blocked
+    delivery_style = Column(String(50), default="flat_scroll")  # flat_scroll, brief
+
+    # Delivery tracking
+    last_delivered_at = Column(TIMESTAMP(timezone=True), nullable=True)  # When user last received digest
 
     # Timestamps
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
@@ -89,6 +93,8 @@ class User(Base):
     # Relationships
     token_usage = relationship("UserTokenUsage", back_populates="user", cascade="all, delete-orphan")
     agent_calls = relationship("AgentCall", back_populates="user", cascade="all, delete-orphan")
+    deliveries = relationship("Delivery", back_populates="user", cascade="all, delete-orphan")
+    conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User(telegram_id={self.telegram_id}, username='{self.username}')>"
@@ -208,3 +214,60 @@ class Summary(Base):
     def __repr__(self):
         user_str = f"user_{self.user_id}" if self.user_id else "shared"
         return f"<Summary(post_id={self.post_id}, {user_str}, {self.prompt_type})>"
+
+
+class Delivery(Base):
+    """Tracks which posts were delivered to which users via Telegram."""
+
+    __tablename__ = "deliveries"
+
+    # Primary key
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+
+    # Foreign keys
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    post_id = Column(UUID(as_uuid=True), ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Delivery metadata
+    message_id = Column(Integer, nullable=True)  # Telegram message ID
+    batch_id = Column(String(36), nullable=False, index=True)  # UUID string - groups posts in same digest
+    reaction = Column(String(10), nullable=True)  # "up" | "down" | null (user reaction)
+
+    # Timestamps
+    delivered_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+    # Relationships
+    user = relationship("User", back_populates="deliveries")
+    post = relationship("Post")
+
+    def __repr__(self):
+        return f"<Delivery(user_id={self.user_id}, post_id={self.post_id}, batch_id={self.batch_id})>"
+
+
+class Conversation(Base):
+    """Stores discussion threads per user per post."""
+
+    __tablename__ = "conversations"
+
+    # Primary key
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+
+    # Foreign keys
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    post_id = Column(UUID(as_uuid=True), ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Conversation data
+    messages = Column(JSON, default=list)  # [{role, content, timestamp}, ...]
+    token_usage = Column(JSON, default=dict)  # {input_tokens, output_tokens, model}
+
+    # Timestamps
+    started_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
+    ended_at = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # Relationships
+    user = relationship("User", back_populates="conversations")
+    post = relationship("Post")
+
+    def __repr__(self):
+        status = "active" if self.ended_at is None else "ended"
+        return f"<Conversation(user_id={self.user_id}, post_id={self.post_id}, status={status})>"

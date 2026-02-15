@@ -12,6 +12,7 @@ class AgentSettings(BaseSettings):
         env_file="backend/.env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",  # Ignore extra fields from environment
     )
 
     # OpenAI Configuration

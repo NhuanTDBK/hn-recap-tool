@@ -1,7 +1,7 @@
 """JSONL implementation of PostRepository with date-partitioned storage."""
 
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Set
 from datetime import datetime
 import logging
 
@@ -138,6 +138,36 @@ class JSONLPostRepository(PostRepository):
                 return Post(**record)
 
         return None
+
+    async def find_existing_hn_ids(self, hn_ids: List[int]) -> Set[int]:
+        """Find which HackerNews IDs already exist in storage.
+
+        Note: This requires scanning all date files.
+
+        Args:
+            hn_ids: List of HackerNews post IDs to check
+
+        Returns:
+            Set of IDs that already exist
+        """
+        if not hn_ids:
+            return set()
+
+        hn_ids_set = set(hn_ids)
+        existing_ids = set()
+
+        # Scan all post files in raw directory
+        for file_path in sorted(self.raw_dir.glob("*-posts.jsonl"), reverse=True):
+            for hn_id in list(hn_ids_set - existing_ids):  # Only check remaining IDs
+                record = find_by_field(str(file_path), "hn_id", hn_id)
+                if record:
+                    existing_ids.add(hn_id)
+
+            # Early exit if all IDs found
+            if existing_ids == hn_ids_set:
+                break
+
+        return existing_ids
 
     async def get_by_id(self, article_id: str) -> Optional[Post]:
         """Find post by article ID (string ID used in content/summaries).

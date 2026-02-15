@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.presentation.api import auth, digests
+from app.presentation.api import auth, digests, deliveries
 from app.infrastructure.config.settings import settings
 from app.infrastructure.services.redis_cache import RedisCacheService
 from app.infrastructure.jobs.data_collector import DataCollectorJob
@@ -17,6 +17,7 @@ from app.presentation.api.dependencies import (
     get_extract_content_use_case,
     get_create_digest_use_case
 )
+from app.presentation.bot import initialize_bot, shutdown_bot
 
 # Configure logging
 logging.basicConfig(
@@ -38,6 +39,13 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
+
+    # Initialize Telegram bot
+    try:
+        await initialize_bot()
+        logger.info("Telegram bot initialized")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Telegram bot: {e}. Continuing without it.")
 
     # Initialize Redis cache
     global cache_service
@@ -88,6 +96,13 @@ async def lifespan(app: FastAPI):
         await cache_service.close()
         logger.info("Redis cache connection closed")
 
+    # Shutdown Telegram bot
+    try:
+        await shutdown_bot()
+        logger.info("Telegram bot shut down")
+    except Exception as e:
+        logger.warning(f"Error shutting down bot: {e}")
+
 
 # Create FastAPI application
 app = FastAPI(
@@ -109,6 +124,7 @@ app.add_middleware(
 # Register routers
 app.include_router(auth.router)
 app.include_router(digests.router)
+app.include_router(deliveries.router)
 
 
 @app.get("/")
