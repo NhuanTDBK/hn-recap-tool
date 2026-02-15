@@ -8,11 +8,10 @@ This pipeline coordinates:
 """
 
 import logging
-from typing import List, Optional
 from datetime import datetime
 
-from app.domain.entities import Post
 from app.application.interfaces import PostRepository
+from app.domain.entities import Post
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,7 @@ class ContentProcessingPipeline:
     def __init__(
         self,
         post_repository: PostRepository,
-        user_id: Optional[int] = None,
+        user_id: int | None = None,
         db_session=None,
         summarization_prompt_type: str = "basic",
     ):
@@ -42,7 +41,7 @@ class ContentProcessingPipeline:
 
     async def process_posts(
         self,
-        posts: List[Post],
+        posts: list[Post],
         skip_crawl: bool = False,
         skip_summarization: bool = False,
     ) -> dict:
@@ -93,7 +92,7 @@ class ContentProcessingPipeline:
         logger.info(f"Pipeline complete: {stats}")
         return stats
 
-    async def _crawl_content(self, posts: List[Post]) -> dict:
+    async def _crawl_content(self, posts: list[Post]) -> dict:
         """Crawl content for posts (placeholder for future implementation).
 
         Args:
@@ -112,8 +111,8 @@ class ContentProcessingPipeline:
 
         return results
 
-    async def _summarize_content(self, posts: List[Post]) -> dict:
-        """Summarize post content using agent system.
+    async def _summarize_content(self, posts: list[Post]) -> dict:
+        """Summarize post content using OpenAI Agents SDK.
 
         Args:
             posts: List of posts to summarize
@@ -121,42 +120,45 @@ class ContentProcessingPipeline:
         Returns:
             Summarization statistics
         """
-        from backend.app.application.use_cases.summarization_agent import (
-            AgentSummarizePostsUseCase,
-        )
+        from app.application.use_cases.summarization import SummarizationPipeline
 
         results = {"success": 0, "errors": []}
 
-        # Filter posts that need summarization
-        posts_to_summarize = [
-            p for p in posts if p.raw_content and not p.summary
-        ]
-
-        if not posts_to_summarize:
-            logger.info("No posts need summarization")
+        if not posts:
+            logger.info("No posts to summarize")
             return results
 
         try:
-            # Use agent-based summarization
-            use_case = AgentSummarizePostsUseCase(
-                post_repository=self.post_repository,
-                user_id=self.user_id,
+            # Use OpenAI Agents SDK-based summarization pipeline
+            pipeline = SummarizationPipeline(
                 db_session=self.db_session,
                 prompt_type=self.summarization_prompt_type,
             )
 
-            summarized_posts = await use_case.execute(posts=posts_to_summarize)
-            results["success"] = len(summarized_posts)
+            pipeline_stats = await pipeline.run(
+                max_posts=len(posts),
+                user_id=self.user_id,
+            )
 
-            logger.info(f"Summarized {len(summarized_posts)} posts")
+            results["success"] = pipeline_stats["succeeded"]
+            if pipeline_stats["errors"]:
+                results["errors"].extend(
+                    [f"Post {e['hn_id']}: {e['error']}" for e in pipeline_stats["errors"]]
+                )
+
+            logger.info(
+                f"Summarized {pipeline_stats['succeeded']} posts "
+                f"({pipeline_stats['failed']} failed, "
+                f"{pipeline_stats['skipped']} skipped)"
+            )
 
         except Exception as e:
-            logger.error(f"Summarization error: {e}")
+            logger.error(f"Summarization pipeline error: {e}", exc_info=True)
             results["errors"].append(f"Summarization failed: {str(e)}")
 
         return results
 
-    async def _store_posts(self, posts: List[Post]) -> dict:
+    async def _store_posts(self, posts: list[Post]) -> dict:
         """Store/update posts in PostgreSQL database.
 
         Args:
@@ -196,7 +198,7 @@ class DailyDigestPipeline:
         """
         self.post_repository = post_repository
 
-    async def generate_digest(self, date: Optional[str] = None) -> dict:
+    async def generate_digest(self, date: str | None = None) -> dict:
         """Generate digest for a specific date.
 
         Args:

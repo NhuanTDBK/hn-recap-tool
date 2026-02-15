@@ -1,7 +1,7 @@
 """PostgreSQL implementation of Post repository."""
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Set
 from uuid import uuid4
 
 from sqlalchemy import select, update
@@ -116,6 +116,24 @@ class PostgresPostRepository(PostRepository):
         post_model = result.scalar_one_or_none()
 
         return self._to_domain(post_model) if post_model else None
+
+    async def find_existing_hn_ids(self, hn_ids: List[int]) -> Set[int]:
+        """Find which HackerNews IDs already exist in database.
+
+        Args:
+            hn_ids: List of HackerNews post IDs to check
+
+        Returns:
+            Set of IDs that already exist
+        """
+        if not hn_ids:
+            return set()
+
+        stmt = select(PostModel.hn_id).where(PostModel.hn_id.in_(hn_ids))
+        result = await self.session.execute(stmt)
+        existing_ids = result.scalars().all()
+
+        return set(existing_ids)
 
     async def find_by_date(self, date: str) -> List[DomainPost]:
         """Find posts collected on a specific date.

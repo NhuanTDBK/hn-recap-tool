@@ -1,0 +1,271 @@
+================================================================================
+  SUMMARIZATION SCHEDULER - QUICK SUMMARY
+================================================================================
+
+PROBLEM:
+  Need to automatically summarize new HN posts hourly for all users
+  without re-summarizing or wasting API quota/money
+
+SOLUTION ARCHITECTURE:
+================================================================================
+
+1. TIMING (APScheduler - CronTrigger)
+
+   :00 - HourlyPostsCollectorJob (existing)
+         └─ Fetch new posts from HN API
+         └─ Store in PostgreSQL
+
+   :15 - HourlySummarizationJob (NEW)  ← Key offset to avoid race
+         └─ Find posts where summary IS NULL
+         └─ Batch process (10-20 posts/batch)
+         └─ Call OpenAI Agents SDK
+         └─ Store summaries back
+         └─ Track costs/tokens
+
+   :30 - DeliveryPipeline (existing)
+         └─ Send digests to users
+         └─ Now filters for posts WITH summaries
+
+================================================================================
+
+2. INCREMENTAL SCANNING (Avoid Re-work)
+
+   Database Query:
+   SELECT * FROM posts
+   WHERE summary IS NULL
+   AND is_dead = false
+   AND is_crawl_success = true
+   ORDER BY created_at DESC
+   LIMIT 100;
+
+   Index Optimization:
+   CREATE INDEX idx_posts_needs_summarization
+   ON posts(summary, is_dead, is_crawl_success, created_at);
+
+   Result:
+   - Only unsummarized posts processed
+   - Each hour = new batch
+   - No duplication of work
+
+================================================================================
+
+3. BATCH PROCESSING (Cost Effective)
+
+   Rate Limiting:
+   └─ 1 API call/second (OpenAI rate limit: 60/min)
+   └─ 1 batch = 10 posts = 10 seconds
+
+   Example Hour:
+   └─ 150 new posts detected
+   └─ Split into 15 batches of 10
+   └─ Process over 2.5 minutes
+   └─ Cost: ~$0.015 per hour
+
+   Token Budget:
+   └─ Input: ~500 tokens/post (avg)
+   └─ Output: ~25 tokens/post (summary)
+   └─ 150 posts = 75K input + 3.75K output tokens
+
+================================================================================
+
+4. ERROR HANDLING (Resilience)
+
+   Failed Post Strategy:
+
+   Hour 1: Post A fails → status=pending, attempts=1 → Retry next hour
+   Hour 2: Post A fails → status=pending, attempts=2 → Retry next hour
+   Hour 3: Post A fails → status=pending, attempts=3 → Mark FAILED, skip
+
+   Continue with new posts immediately (don't block)
+
+================================================================================
+
+5. DATABASE CHANGES (Minimal)
+
+   Add to posts table:
+
+   ALTER TABLE posts ADD COLUMN (
+       summary TEXT,                    -- The summary result
+       summarized_at TIMESTAMP,         -- When summarized
+       summarization_status VARCHAR(20), -- pending|completed|failed
+       summarization_error TEXT,        -- Error message if failed
+       summarization_attempts INT       -- Retry counter
+   );
+
+   Track in agent_calls table:
+   - Model: "gpt-4o-mini"
+   - Operation: "batch_hourly_summarization"
+   - Input/output tokens for cost tracking
+
+================================================================================
+
+6. CONFIGURATION (Flexible)
+
+   SUMMARIZATION_ENABLED=true
+   SUMMARIZATION_BATCH_SIZE=10
+   SUMMARIZATION_MAX_ATTEMPTS=3
+   SUMMARIZATION_PROMPT_TYPE=basic
+   SUMMARIZATION_RATE_LIMIT_RPS=1
+   SUMMARIZATION_COST_LIMIT_DAILY=10.0
+
+================================================================================
+
+7. COST PROJECTION
+
+   Average:
+   - 200 posts/hour × $0.00008/post = $0.016/hour
+   - $0.384/day
+   - $11.52/month
+
+   Peak:
+   - 400 posts/hour × $0.00008/post = $0.032/hour
+   - $0.768/day
+   - $23.04/month (worst case)
+
+   Mitigation:
+   - Set daily limit: $10/day → auto-disable if exceeded
+   - Monitor hourly costs
+   - Reduce batch size in off-peak
+
+================================================================================
+
+8. INTEGRATION IMPACT
+
+   Minimal changes to existing code:
+
+   Option A: DeliveryPipeline (1 line change)
+   WHERE created_at > user.last_delivered_at
+   AND summary IS NOT NULL  ← NEW
+
+   Option B: Skip entirely (posts will have NULL summary if behind)
+   Delivery waits for summaries to be ready
+
+================================================================================
+
+9. MONITORING & ALERTING
+
+   Metrics to track:
+   - Posts summarized/hour
+   - API calls made
+   - Token usage
+   - Cost accumulated
+   - Error rate
+   - Processing time
+
+   Alerts:
+   - Cost exceeds daily limit
+   - API failure (3+ consecutive failures)
+   - Processing time > 15 minutes
+   - Backlog > 500 posts
+
+================================================================================
+
+10. EDGE CASES & FALLBACKS
+
+    What if API is down?
+    └─ Skip that hour
+    └─ Retry next hour with double batch size
+    └─ Continue new posts as normal
+
+    What if backlog accumulates?
+    └─ Option A: Double batch size (faster processing)
+    └─ Option B: Prioritize high-score posts
+    └─ Option C: Accept delay (eventual consistency)
+
+    What if cost exceeds budget?
+    └─ Auto-disable summarization for that day
+    └─ Notify admin
+    └─ Resume next day
+
+================================================================================
+
+11. KEY DESIGN DECISIONS
+
+    ✓ Run at :15 (not :00) - Avoid race with collection
+    ✓ Batch size: 10 posts - Balance between speed and cost
+    ✓ Rate limit: 1 call/sec - Respect API limits
+    ✓ Max attempts: 3 - Balance between coverage and cost
+    ✓ Status column - Track retry attempts
+    ✓ Incremental only - Never re-summarize
+    ✓ Cost tracking - Monitor budget
+    ✓ Error recovery - Don't stop on failures
+
+================================================================================
+
+12. IMPLEMENTATION APPROACH (When Ready)
+
+    Phase 1: Core Job Class
+    └─ HourlySummarizationJob class
+    └─ find_unsummarized_posts()
+    └─ summarize_batch()
+    └─ update_post_summaries()
+
+    Phase 2: Database & Monitoring
+    └─ Add columns to posts table
+    └─ Create tracking table
+    └─ Add indexes
+
+    Phase 3: Integration
+    └─ Register with APScheduler at :15
+    └─ Update delivery logic
+    └─ Add configuration
+
+    Phase 4: Testing & Validation
+    └─ Unit tests
+    └─ Integration tests
+    └─ Load testing
+
+    Phase 5: Operations
+    └─ Monitoring setup
+    └─ Alerting rules
+    └─ Documentation
+
+================================================================================
+
+13. QUESTION ANSWERED: HOW DOES IT WORK?
+
+    FLOW:
+
+    Hour 1 (:00) - Collection
+    ├─ HN API fetched 150 new posts
+    ├─ Stored in PostgreSQL with summary=NULL
+    └─ RocksDB metadata cached
+
+    Hour 1 (:15) - Summarization ← NEW
+    ├─ Query: SELECT * FROM posts WHERE summary IS NULL
+    ├─ Found: 150 posts
+    ├─ Split into: 15 batches (10 posts each)
+    ├─ For each batch:
+    │  ├─ Call SummarizationAgent.summarize(batch)
+    │  ├─ Get back SummaryOutput (summary + key_points + confidence)
+    │  ├─ Store in: UPDATE posts SET summary=... WHERE id IN (...)
+    │  ├─ Track in: INSERT INTO agent_calls (tokens, cost, etc)
+    │  └─ Wait 10 seconds (rate limiting)
+    ├─ Results: 148 summarized, 2 failed with error
+    └─ Total time: ~3 minutes
+
+    Hour 1 (:30) - Delivery ← Optional
+    ├─ DeliveryPipeline runs (existing code)
+    ├─ For each user:
+    │  ├─ Find posts after user.last_delivered_at
+    │  ├─ Filter: WHERE summary IS NOT NULL ← NEW
+    │  ├─ Format message with summary
+    │  └─ Send via Telegram
+    └─ Update user.last_delivered_at
+
+    Hour 2 (:00) - Collection (rinse, repeat)
+    ├─ Another 120 new posts fetched
+    └─ Added to database with summary=NULL
+
+    Hour 2 (:15) - Summarization
+    ├─ Query finds: 120 new posts (previous hour's 2 failed ones too)
+    ├─ Retry failed + summarize new
+    ├─ 118 succeed, 4 failed
+    └─ Accumulating stats for cost tracking
+
+================================================================================
+
+END BRAINSTORM - Ready for Implementation Phase
+
+Next: Write the code when ready!
+================================================================================

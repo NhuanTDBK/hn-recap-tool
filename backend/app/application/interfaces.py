@@ -6,7 +6,7 @@ depend on abstractions, not concrete implementations.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, List
+from typing import Optional, List, Set
 from datetime import datetime
 
 from app.domain.entities import User, Post, Comment, Digest
@@ -118,6 +118,18 @@ class PostRepository(ABC):
         pass
 
     @abstractmethod
+    async def find_existing_hn_ids(self, hn_ids: List[int]) -> Set[int]:
+        """Find which HackerNews IDs already exist in storage.
+
+        Args:
+            hn_ids: List of HackerNews post IDs to check
+
+        Returns:
+            Set of IDs that already exist
+        """
+        pass
+
+    @abstractmethod
     async def find_by_date(self, date: str) -> List[Post]:
         """Find all posts collected on a specific date.
 
@@ -213,6 +225,165 @@ class CommentRepository(ABC):
 
         Returns:
             List of comments for that post
+        """
+        pass
+
+
+class DeliveryRepository(ABC):
+    """Interface for delivery tracking."""
+
+    @abstractmethod
+    async def save_delivery(
+        self,
+        user_id: int,
+        post_id: str,
+        batch_id: str,
+        message_id: Optional[int] = None,
+    ) -> dict:
+        """Save a delivery record (post sent to user).
+
+        Args:
+            user_id: User who received the post
+            post_id: Post that was delivered
+            batch_id: Batch ID (groups posts in same digest)
+            message_id: Telegram message ID (optional)
+
+        Returns:
+            Delivery record with ID
+        """
+        pass
+
+    @abstractmethod
+    async def find_deliveries_for_user(
+        self,
+        user_id: int,
+        limit: int = 10,
+    ) -> list:
+        """Find recent deliveries for a user.
+
+        Args:
+            user_id: User ID
+            limit: Maximum number of deliveries to return
+
+        Returns:
+            List of delivery records ordered by delivered_at DESC
+        """
+        pass
+
+    @abstractmethod
+    async def find_deliveries_for_batch(self, batch_id: str) -> list:
+        """Find all deliveries in a batch.
+
+        Args:
+            batch_id: Batch ID
+
+        Returns:
+            List of delivery records for this batch
+        """
+        pass
+
+    @abstractmethod
+    async def update_reaction(
+        self,
+        delivery_id: str,
+        reaction: str,
+    ) -> dict:
+        """Update user reaction to a delivered post.
+
+        Args:
+            delivery_id: Delivery record ID
+            reaction: "up" | "down"
+
+        Returns:
+            Updated delivery record
+        """
+        pass
+
+    @abstractmethod
+    async def get_user_delivery_count(
+        self,
+        user_id: int,
+        days: int = 7,
+    ) -> int:
+        """Count deliveries to user in past N days.
+
+        Args:
+            user_id: User ID
+            days: Number of days to look back
+
+        Returns:
+            Number of deliveries
+        """
+        pass
+
+
+class ConversationRepository(ABC):
+    """Interface for conversation/discussion storage."""
+
+    @abstractmethod
+    async def save_conversation(
+        self,
+        user_id: int,
+        post_id: str,
+        messages: list,
+        token_usage: dict,
+    ) -> dict:
+        """Save a conversation record.
+
+        Args:
+            user_id: User in conversation
+            post_id: Post being discussed
+            messages: List of message dicts
+            token_usage: Token usage dict
+
+        Returns:
+            Conversation record with ID
+        """
+        pass
+
+    @abstractmethod
+    async def find_active_conversation(self, user_id: int) -> Optional[dict]:
+        """Find active conversation for user.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            Conversation record if active, None otherwise
+        """
+        pass
+
+    @abstractmethod
+    async def update_messages(
+        self,
+        conversation_id: str,
+        messages: list,
+    ) -> dict:
+        """Update messages in a conversation.
+
+        Args:
+            conversation_id: Conversation ID
+            messages: Updated message list
+
+        Returns:
+            Updated conversation record
+        """
+        pass
+
+    @abstractmethod
+    async def end_conversation(
+        self,
+        conversation_id: str,
+        token_usage: dict,
+    ) -> dict:
+        """End a conversation and record token usage.
+
+        Args:
+            conversation_id: Conversation ID
+            token_usage: Final token usage dict
+
+        Returns:
+            Ended conversation record
         """
         pass
 
