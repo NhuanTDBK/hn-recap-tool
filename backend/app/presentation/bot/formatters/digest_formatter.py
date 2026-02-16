@@ -35,16 +35,17 @@ class DigestMessageFormatter:
     ) -> str:
         """Format a single post as a Telegram message.
 
-        Format per spec (Style 2):
+        New improved format (inspired by push_to_telegram.py):
         ```
-        🔶 1/8 · PostgreSQL 18 Released
-        postgresql.org
+        *PostgreSQL 18 Released*
+        [HN Discussion](https://news.ycombinator.com/item?id=12345)
 
-        Major performance gains across OLTP
-        workloads with up to 2x throughput.
+        Major performance gains across OLTP workloads with up to 2x throughput.
         New JSON path indexing and async I/O.
 
-        ⬆️ 452 · 💬 230
+        [Read Article](https://postgresql.org/about/news/...)
+
+        ⬆️ 452 · 💬 230 · 1/8
         ```
 
         Args:
@@ -55,23 +56,35 @@ class DigestMessageFormatter:
         Returns:
             Formatted message text (without buttons)
         """
-        # Header: Position counter and title
+        message_parts = []
+
+        # Title (bold with Markdown)
         title = post.title or "Untitled"
-        header = f"🔶 {position}/{total} · {title}\n"
+        message_parts.append(f"*{self._escape_markdown(title)}*")
 
-        # Domain: Extract from URL
-        domain = self._extract_domain(post.url) if post.url else "hn.algolia.com"
-        domain_line = f"{domain}\n"
+        # HackerNews discussion link
+        if post.hn_id:
+            hn_link = f"https://news.ycombinator.com/item?id={post.hn_id}"
+            message_parts.append(f"[HN Discussion]({hn_link})")
 
-        # Summary: Use 2-3 sentence summary from DB
+        # Summary text
         summary = self._format_summary(post.summary)
-        summary_line = f"\n{summary}\n" if summary else ""
+        if summary:
+            message_parts.append(f"\n{summary}")
 
-        # Stats: Score and comment count
-        stats = f"\n⬆️ {post.score} · 💬 {post.comment_count}"
+        # External article link (if available)
+        if post.url:
+            # Escape special characters in URL for Markdown
+            safe_url = self._escape_url_for_markdown(post.url)
+            domain = self._extract_domain(post.url)
+            message_parts.append(f"\n[Read Article on {domain}]({safe_url})")
+
+        # Stats: Score, comments, and position
+        stats = f"\n⬆️ {post.score} · 💬 {post.comment_count} · {position}/{total}"
+        message_parts.append(stats)
 
         # Combine all parts
-        message = header + domain_line + summary_line + stats
+        message = "\n".join(message_parts)
 
         # Ensure message doesn't exceed Telegram limit
         if len(message) > self.MAX_MESSAGE_LENGTH:
@@ -139,6 +152,45 @@ class DigestMessageFormatter:
 
         return summary
 
+    def _escape_markdown(self, text: str) -> str:
+        """Escape Markdown special characters in text.
+
+        Telegram uses Markdown for formatting, so we need to escape:
+        * (asterisk), _ (underscore), [ (bracket), ] (bracket), ( (paren), ) (paren)
+
+        Args:
+            text: Text to escape
+
+        Returns:
+            Escaped text safe for Markdown
+        """
+        if not text:
+            return ""
+
+        # Escape special Markdown characters
+        escape_chars = ['*', '_', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for char in escape_chars:
+            text = text.replace(char, f'\\{char}')
+
+        return text
+
+    def _escape_url_for_markdown(self, url: str) -> str:
+        """Escape URL for Markdown link format.
+
+        Only escape ')' in URLs as other characters are allowed.
+
+        Args:
+            url: URL to escape
+
+        Returns:
+            Escaped URL
+        """
+        if not url:
+            return ""
+
+        # Only escape closing parenthesis in URLs
+        return url.replace(')', '\\)')
+
 
 class InlineKeyboardBuilder:
     """Builds inline keyboard buttons for Telegram messages."""
@@ -147,10 +199,8 @@ class InlineKeyboardBuilder:
         """Build inline keyboard for a post message.
 
         Returns button structure for:
-        - Discuss button (💬)
-        - Read button (🔗)
-        - Save button (⭐)
-        - Reaction buttons (👍 👎)
+        - Discuss button (💬) - Start AI discussion about the post
+        - Reaction buttons (👍 👎) - Express interest/feedback
 
         Args:
             post_id: Post ID (UUID string)
@@ -160,23 +210,12 @@ class InlineKeyboardBuilder:
         """
         buttons = {
             "inline_keyboard": [
-                # Row 1: Action buttons
+                # Row 1: Discuss and reaction buttons
                 [
                     {
                         "text": "💬 Discuss",
                         "callback_data": f"discuss_{post_id}",
                     },
-                    {
-                        "text": "🔗 Read",
-                        "callback_data": f"read_{post_id}",
-                    },
-                    {
-                        "text": "⭐ Save",
-                        "callback_data": f"save_{post_id}",
-                    },
-                ],
-                # Row 2: Reaction buttons
-                [
                     {
                         "text": "👍",
                         "callback_data": f"react_up_{post_id}",

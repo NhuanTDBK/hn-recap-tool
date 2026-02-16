@@ -1,12 +1,36 @@
 #!/usr/bin/env python
-"""Evaluate summarization prompts using LLM-as-judge framework."""
+"""Evaluate summarization prompts using LLM-as-judge framework.
+
+This module uses an LLM-as-judge approach to evaluate different summarization prompt variants.
+
+EVALUATION METRICS:
+    - factual_accuracy (0-10): How accurately the summary represents the article content
+    - information_density (0-10): How much useful information is included per word
+    - clarity (0-10): How clear and well-structured the summary is
+    - relevance (0-10): How relevant the summary is to HackerNews audience
+    - length_compliance (0-10): How well the summary adheres to length constraints
+
+SCORING:
+    - overall_score (0-100): Composite score from all dimensions
+    - pass_rate: Percentage of summaries scoring >= 80%
+    - pass_threshold: 80% overall score required to pass
+
+PROMPT VARIANTS EVALUATED:
+    - basic: Detailed, comprehensive summaries
+    - technical: Technical language, concepts emphasized
+    - business: Business/professional focus
+    - concise: Ultra-brief summaries for quick scanning
+    - personalized: User preference-based summaries
+"""
 
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dotenv import load_dotenv
 from openai import OpenAI
 
 # Setup logging
@@ -33,7 +57,7 @@ class PromptEvaluator:
 
     def _load_judge_prompt(self) -> str:
         """Load judge evaluation prompt."""
-        prompts_dir = Path(__file__).parent.parent / "app/infrastructure/prompts"
+        prompts_dir = Path(__file__).parent.parent.parent / "app/infrastructure/prompts"
         judge_file = prompts_dir / "judge.md"
 
         if not judge_file.exists():
@@ -43,7 +67,7 @@ class PromptEvaluator:
 
     def _load_test_dataset(self) -> List[Dict[str, Any]]:
         """Load test dataset."""
-        test_file = Path(__file__).parent.parent.parent / "data/test_posts.json"
+        test_file = Path(__file__).parent.parent.parent.parent / "data/test_posts.json"
 
         if not test_file.exists():
             raise FileNotFoundError(f"Test dataset not found: {test_file}")
@@ -53,7 +77,7 @@ class PromptEvaluator:
 
     def _get_summarization_prompt(self, prompt_type: str) -> str:
         """Load summarization prompt."""
-        prompts_dir = Path(__file__).parent.parent / "app/infrastructure/prompts"
+        prompts_dir = Path(__file__).parent.parent.parent / "app/infrastructure/prompts"
         prompt_file = prompts_dir / f"summarizer_{prompt_type}.md"
 
         if not prompt_file.exists():
@@ -303,7 +327,7 @@ class PromptEvaluator:
 
     def _save_results(self, all_results: Dict[str, Dict[str, Any]]):
         """Save evaluation results to file."""
-        output_file = Path(__file__).parent.parent.parent / "data/evaluation_results.json"
+        output_file = Path(__file__).parent.parent.parent.parent / "data/evaluation_results.json"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output_file, "w") as f:
@@ -314,7 +338,8 @@ class PromptEvaluator:
 
 def main():
     """Main entry point."""
-    import os
+    # Load environment variables from .env file
+    load_dotenv()
 
     openai_api_key = os.getenv("OPENAI_API_KEY")
     if not openai_api_key:

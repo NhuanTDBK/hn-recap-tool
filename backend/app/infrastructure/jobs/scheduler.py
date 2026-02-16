@@ -18,6 +18,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.infrastructure.jobs.hourly_posts_collector import HourlyPostsCollectorJob
+from app.infrastructure.jobs.hourly_delivery_job import HourlyDeliveryJob
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class JobScheduler:
         """Initialize job scheduler."""
         self.scheduler = AsyncIOScheduler()
         self.hourly_collector: Optional[HourlyPostsCollectorJob] = None
+        self.hourly_delivery: Optional[HourlyDeliveryJob] = None
 
     def register_hourly_collector(
         self, hourly_collector: HourlyPostsCollectorJob
@@ -41,37 +43,69 @@ class JobScheduler:
         self.hourly_collector = hourly_collector
         logger.info("Registered hourly posts collector job")
 
+    def register_hourly_delivery(
+        self, hourly_delivery: HourlyDeliveryJob
+    ) -> None:
+        """Register the hourly delivery job.
+
+        Args:
+            hourly_delivery: HourlyDeliveryJob instance
+        """
+        self.hourly_delivery = hourly_delivery
+        logger.info("Registered hourly delivery job")
+
     def start(self) -> None:
         """Start the scheduler with all registered jobs.
 
         Jobs:
         - Every hour at :00 minutes: Collect top posts
+        - Every hour at :05 minutes: Deliver summaries to users
         """
-        if not self.hourly_collector:
-            logger.warning("No hourly collector registered, skipping hourly job")
-            # Can still start for other jobs
-            if self.scheduler.get_jobs():
-                self.scheduler.start()
-                logger.info("Scheduler started with other jobs")
+        jobs_registered = 0
+
+        # Schedule hourly collection if registered
+        if self.hourly_collector:
+            logger.info("Scheduling hourly posts collection job")
+            trigger = CronTrigger(minute=0, timezone="UTC")
+
+            self.scheduler.add_job(
+                self.hourly_collector.run_collection,
+                trigger=trigger,
+                id="hourly_posts_collection",
+                name="Hourly HackerNews Posts Collection",
+                replace_existing=True,
+                max_instances=1,  # Prevent concurrent executions
+            )
+            jobs_registered += 1
+            logger.info("Scheduled: Hourly posts collection at :00")
+        else:
+            logger.warning("No hourly collector registered, skipping collection job")
+
+        # Schedule hourly delivery if registered
+        if self.hourly_delivery:
+            logger.info("Scheduling hourly delivery job")
+            trigger = CronTrigger(minute=5, timezone="UTC")
+
+            self.scheduler.add_job(
+                self.hourly_delivery.run_delivery,
+                trigger=trigger,
+                id="hourly_delivery",
+                name="Hourly Digest Delivery",
+                replace_existing=True,
+                max_instances=1,  # Prevent concurrent executions
+            )
+            jobs_registered += 1
+            logger.info("Scheduled: Hourly delivery at :05")
+        else:
+            logger.warning("No hourly delivery registered, skipping delivery job")
+
+        if jobs_registered == 0:
+            logger.error("No jobs registered, scheduler will not start")
             return
-
-        # Schedule hourly collection at every hour (00 minutes)
-        # Example: 9:00, 10:00, 11:00, etc.
-        logger.info("Scheduling hourly posts collection job")
-        trigger = CronTrigger(minute=0, timezone="UTC")
-
-        self.scheduler.add_job(
-            self.hourly_collector.run_collection,
-            trigger=trigger,
-            id="hourly_posts_collection",
-            name="Hourly HackerNews Posts Collection",
-            replace_existing=True,
-            max_instances=1,  # Prevent concurrent executions
-        )
 
         # Start scheduler
         self.scheduler.start()
-        logger.info("Scheduler started - Hourly posts collection scheduled at :00")
+        logger.info(f"Scheduler started - {jobs_registered} job(s) scheduled")
 
     def stop(self) -> None:
         """Stop the scheduler and all running jobs."""

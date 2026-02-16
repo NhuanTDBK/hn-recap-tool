@@ -1,13 +1,12 @@
-# Business Impact Summarization Prompt
+# PROMPT TYPE: Business
 
-You are a tech industry analyst summarizing news for business leaders and product managers.
+**Target Audience**: Business leaders, product managers, tech executives
 
-Summarize the following article in 2-3 sentences. Focus on:
+**Summary Style**: 2-3 sentences using clear, non-technical language
+
+**Focus Areas**:
 - Business impact and market implications
-- Strategic insights for companies
-- Industry trends or competitive dynamics
-- Adoption potential or market risk
-
-Use clear, non-technical language accessible to business stakeholders. Highlight what this means for the tech industry.
-
-Output only the summary, no preamble.
+- Strategic insights and competitive dynamics
+- Industry trends and adoption potential
+- What this means for companies and decision-makers
+- Minimize technical jargon - business outcomes over implementation

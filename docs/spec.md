@@ -77,9 +77,10 @@ A Telegram bot that delivers curated Hacker News summaries to your DM and lets y
 
 - Telegram bot server running on Vercel
 - Delivers digest messages on schedule
-- Handles inline button callbacks (expand post, discuss, save, reactions)
+- Handles inline button callbacks (discuss, reactions)
 - Manages discussion state (active post per user, auto-switch)
 - Routes commands
+- **Note**: Read and Save buttons removed (links now embedded in messages)
 
 ---
 
@@ -181,53 +182,64 @@ Compact. One message. Tap to expand.
 
 Small message. Under Telegram limits. User taps a number to expand.
 
-### Style 2: Flat Scroll (preferred)
+### Style 2: Flat Scroll (preferred) — Updated Format
 
 Each post is its own message. User scrolls through at their own pace.
+Links are now clickable in the message text using Markdown formatting.
 
 ```
 ┌─────────────────────────────────────────┐
-│  🔶 1/8 · PostgreSQL 18 Released        │
-│  postgresql.org                         │
+│  PostgreSQL 18 Released                 │
+│  HN Discussion                          │
 │                                         │
 │  Major performance gains across OLTP    │
 │  workloads with up to 2x throughput.    │
 │  New JSON path indexing and async I/O.  │
 │                                         │
-│  ⬆️ 452 · 💬 230                        │
+│  Read Article on postgresql.org         │
 │                                         │
-│  ┌──────────┬────────┬────────┐         │
-│  │ 💬 Discuss│ 🔗 Read │ ⭐ Save │       │
-│  └──────────┴────────┴────────┘         │
-│  👍  👎                                 │
+│  ⬆️ 452 · 💬 230 · 1/8                  │
+│                                         │
+│  ┌──────────┬─────┬─────┐              │
+│  │ 💬 Discuss│ 👍  │ 👎  │              │
+│  └──────────┴─────┴─────┘              │
 └─────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────┐
-│  🔶 2/8 · Why We Left Kubernetes        │
-│  blog.startup.io                        │
+│  Why We Left Kubernetes                 │
+│  HN Discussion                          │
 │                                         │
 │  A 15-person startup shares why they    │
 │  moved back to bare metal after 2       │
 │  years on K8s. Cost and complexity.     │
 │                                         │
-│  ⬆️ 389 · 💬 187                        │
+│  Read Article on blog.startup.io        │
 │                                         │
-│  ┌──────────┬────────┬────────┐         │
-│  │ 💬 Discuss│ 🔗 Read │ ⭐ Save │       │
-│  └──────────┴────────┴────────┘         │
-│  👍  👎                                 │
+│  ⬆️ 389 · 💬 187 · 2/8                  │
+│                                         │
+│  ┌──────────┬─────┬─────┐              │
+│  │ 💬 Discuss│ 👍  │ 👎  │              │
+│  └──────────┴─────┴─────┘              │
 └─────────────────────────────────────────┘
 
          ... continues scrolling ...
 ```
 
-### Expanded Post (from Style 1 tap)
+**Format Changes (2026-02-15)**:
+- **Bold title** using Markdown (asterisks removed from display)
+- **Clickable "HN Discussion" link** to HackerNews comments
+- **Clickable "Read Article" link** with domain name
+- **Position indicator** moved to stats line (e.g., "1/8")
+- **Simplified buttons**: Removed Read and Save (redundant with inline links)
+- **Parse mode**: Changed from HTML to Markdown for better reliability
+
+### Expanded Post (from Style 1 tap) — Updated Format
 
 ```
 ┌─────────────────────────────────────────┐
 │                                         │
-│  🔶 PostgreSQL 18 Released              │
-│  postgresql.org                         │
+│  PostgreSQL 18 Released                 │
+│  HN Discussion                          │
 │                                         │
 │  PostgreSQL 18 brings significant       │
 │  performance improvements to OLTP       │
@@ -237,12 +249,13 @@ Each post is its own message. User scrolls through at their own pace.
 │  indexing, async I/O for vacuum, and    │
 │  improved logical replication.          │
 │                                         │
-│  ⬆️ 452 · 💬 230                        │
+│  Read Article on postgresql.org         │
 │                                         │
-│  ┌──────────┬────────┬────────┐         │
-│  │ 💬 Discuss│ 🔗 Read │ ⭐ Save │       │
-│  └──────────┴────────┴────────┘         │
-│  👍  👎                                 │
+│  ⬆️ 452 · 💬 230 · 1/8                  │
+│                                         │
+│  ┌──────────┬─────┬─────┐              │
+│  │ 💬 Discuss│ 👍  │ 👎  │              │
+│  └──────────┴─────┴─────┘              │
 │                                         │
 └─────────────────────────────────────────┘
 ```
@@ -619,7 +632,9 @@ That's it. Everything else happens through inline buttons on messages.
 | 1     | Ingest: HN poll → crawl → HTML → MD → S3 + DB        |
 | 2     | Summarize: read MD from S3 → Claude → store summary  |
 | 3     | Bot: /start + deliver flat scroll digests to your DM |
-| 4     | Inline buttons: Discuss, Read, Save, 👍👎            |
+| 4     | Inline buttons: Discuss, 👍👎 (Read/Save removed)   |
 | 5     | Discussion flow with article context                 |
 | 6     | Memory: track + extract + surface in discussions     |
 | 7     | Commands: /memory, /saved, /token, /pause            |
+
+**Status (2026-02-15)**: Phases 1-4 complete. Format updated with clickable Markdown links.

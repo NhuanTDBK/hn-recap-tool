@@ -1,9 +1,11 @@
-# Concise Summarization Prompt
+# PROMPT TYPE: Concise
 
-Create an ultra-brief summary for busy developers.
+**Target Audience**: Extremely busy developers who need information at a glance
 
-Summarize the following article in ONE sentence (max 30 words). Capture only the single most important point that a developer needs to know.
+**Summary Style**: ONE sentence, maximum 30 words, ultra-brief
 
-Be direct and punchy. Focus on the core innovation or insight.
-
-Output only the summary, no preamble.
+**Focus Areas**:
+- Single most important point only
+- Core innovation or insight
+- Direct and punchy - no fluff
+- What a developer absolutely must know

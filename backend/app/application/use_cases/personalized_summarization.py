@@ -2,9 +2,12 @@
 
 This module implements personalized summarization that:
 1. Groups users by delivery_style to minimize API calls
-2. Uses incremental time windows to process only new posts
+2. Uses incremental post ID ranges to process only new posts (EPIC-4)
 3. Generates per-user summaries with user_id
 4. Leverages prompt caching for efficiency
+
+Note: As of EPIC-4, the pipeline uses post ID-based selection instead of
+timestamp-based selection to guarantee complete coverage without gaps.
 """
 
 import logging
@@ -106,6 +109,166 @@ async def get_group_time_window(
     )
 
     return earliest
+
+
+# ============================================================================
+# NEW: Post ID-based selection functions (EPIC-4)
+# These replace timestamp-based selection for guaranteed sequential coverage
+# ============================================================================
+
+
+async def get_user_last_summary_post_id(
+    session: AsyncSession,
+    user_id: int
+) -> Optional[int]:
+    """Get user's most recent summary post hn_id.
+
+    This function replaces get_user_last_summary_time() for ID-based selection.
+    Uses Post.hn_id (HackerNews ID) which is a sequential integer.
+
+    Args:
+        session: Database session
+        user_id: User ID
+
+    Returns:
+        Latest summary post hn_id, or None if no summaries exist
+    """
+    # Join summaries with posts to get the max hn_id
+    stmt = (
+        select(func.max(Post.hn_id))
+        .select_from(Summary)
+        .join(Post, Summary.post_id == Post.id)
+        .where(Summary.user_id == user_id)
+    )
+    result = await session.execute(stmt)
+    last_hn_id = result.scalar_one_or_none()
+
+    logger.debug(
+        f"User {user_id}: last summary post hn_id = {last_hn_id}"
+    )
+
+    return last_hn_id
+
+
+async def get_group_post_id_window(
+    session: AsyncSession,
+    users: List[User]
+) -> Optional[int]:
+    """Get minimum last summary post hn_id across all users in group.
+
+    This ensures we fetch all posts that any user in the group needs.
+    Replaces get_group_time_window() for ID-based selection.
+    Uses Post.hn_id (HackerNews ID) which is a sequential integer.
+
+    Args:
+        session: Database session
+        users: List of users in the group
+
+    Returns:
+        Minimum post hn_id across users, or None if no summaries exist
+    """
+    hn_ids = []
+    for user in users:
+        last_hn_id = await get_user_last_summary_post_id(session, user.id)
+        if last_hn_id is not None:
+            hn_ids.append(last_hn_id)
+
+    if not hn_ids:
+        logger.info(
+            f"Group post ID window: No summaries exist for {len(users)} users, "
+            f"will use fallback to latest posts"
+        )
+        return None
+
+    min_id = min(hn_ids)
+    max_id = max(hn_ids)
+
+    logger.info(
+        f"Group post ID window: starting from hn_id={min_id} "
+        f"(min of {len(users)} users, range: {min_id}-{max_id})"
+    )
+
+    return min_id
+
+
+async def find_posts_by_id_range(
+    session: AsyncSession,
+    min_hn_id: Optional[int] = None,
+    limit: Optional[int] = None,
+    fallback_to_latest: bool = True,
+    latest_post_limit: int = 10
+) -> List[Post]:
+    """Find posts with hn_id greater than min_hn_id.
+
+    This replaces find_posts_in_time_window() for ID-based selection.
+    Guarantees sequential coverage of all posts without gaps.
+    Uses Post.hn_id (HackerNews ID) which is a sequential integer.
+
+    Args:
+        session: Database session
+        min_hn_id: Fetch posts with hn_id > this value (None = use fallback)
+        limit: Maximum posts to return
+        fallback_to_latest: If min_hn_id is None, get latest N posts
+        latest_post_limit: Number of latest posts to return on fallback
+
+    Returns:
+        List of posts ordered by score descending
+    """
+    if min_hn_id is not None:
+        # ID-based selection: posts with hn_id > min_hn_id
+        # Note: We removed is_crawl_success filter to allow posts that haven't been
+        # crawled yet to be summarized - the summarization pipeline can work with
+        # title/metadata even if content extraction hasn't been completed
+        stmt = select(Post).where(
+            and_(
+                Post.hn_id > min_hn_id,
+                Post.type == "story",
+                Post.is_dead.is_(False),
+                Post.is_deleted.is_(False),
+            )
+        ).order_by(Post.score.desc())
+
+        if limit:
+            stmt = stmt.limit(limit)
+
+        result = await session.execute(stmt)
+        posts = list(result.scalars().all())
+
+        logger.info(
+            f"Found {len(posts)} posts with hn_id > {min_hn_id} (after filtering: type=story, not dead/deleted)"
+        )
+
+        return posts
+
+    elif fallback_to_latest:
+        # Fallback: get latest posts by hn_id (for new users with no summaries)
+        logger.info(
+            f"No min_hn_id provided, falling back to latest {latest_post_limit} posts by hn_id"
+        )
+
+        stmt = select(Post).where(
+            and_(
+                Post.type == "story",
+                Post.is_dead.is_(False),
+                Post.is_deleted.is_(False),
+                Post.is_crawl_success.is_(True),
+            )
+        ).order_by(Post.hn_id.desc()).limit(latest_post_limit)
+
+        result = await session.execute(stmt)
+        posts = list(result.scalars().all())
+
+        logger.info(f"Found {len(posts)} latest posts (fallback mode)")
+        return posts
+
+    else:
+        return []
+
+
+# ============================================================================
+# OLD: Timestamp-based functions (kept for backward compatibility)
+# Will be removed after validation of ID-based approach
+# ============================================================================
 
 
 async def find_posts_in_time_window(
@@ -355,6 +518,29 @@ async def summarize_for_users_in_group(
 
     for post in posts:
         try:
+            # First, check if ANY user in the group needs this post's summary
+            # This avoids expensive API calls for posts all users already have
+            user_ids = [u.id for u in users]
+
+            # Find which users already have summaries for this post
+            stmt = select(Summary.user_id).where(
+                and_(
+                    Summary.user_id.in_(user_ids),
+                    Summary.post_id == post.id,
+                    Summary.prompt_type == prompt_type
+                )
+            )
+            result = await session.execute(stmt)
+            users_with_summary = set(result.scalars().all())
+
+            # Identify which users need the summary
+            users_needing_summary = [u for u in users if u.id not in users_with_summary]
+
+            # If all users already have this summary, skip the API call
+            if not users_needing_summary:
+                logger.debug(f"Post {post.id}: All {len(users)} users already have summary, skipping")
+                continue
+
             # Get content
             content = await get_post_content(post, content_store)
 
@@ -407,21 +593,8 @@ async def summarize_for_users_in_group(
                 actual_tokens = len(content) // 4 + len(summary_text) // 4
                 cost_per_summary = Decimal(str(actual_tokens * 0.00000015))
 
-            # Distribute summary to all users in group who need it
-            for user in users:
-                # Check if user already has this summary
-                existing = await session.execute(
-                    select(Summary).where(
-                        and_(
-                            Summary.user_id == user.id,
-                            Summary.post_id == post.id,
-                            Summary.prompt_type == prompt_type
-                        )
-                    )
-                )
-                if existing.scalar_one_or_none():
-                    continue  # User already has this summary
-
+            # Distribute summary to users in group who need it
+            for user in users_needing_summary:
                 # Create summary record for this user
                 summary = Summary(
                     post_id=post.id,
@@ -444,7 +617,7 @@ async def summarize_for_users_in_group(
             stats["total_cost"] += cost_per_summary
 
             logger.debug(
-                f"✓ Post {post.id}: summarized and distributed to {len(users)} users"
+                f"✓ Post {post.id}: summarized and distributed to {len(users_needing_summary)} users"
             )
 
         except Exception as e:
@@ -467,17 +640,20 @@ async def run_personalized_summarization(
 ) -> Dict:
     """Run personalized summarization pipeline with grouping by delivery_style.
 
+    Note: As of EPIC-4, this pipeline uses post ID-based selection instead of
+    timestamp-based selection for guaranteed sequential coverage.
+
     Args:
         session: Database session
         content_store: RocksDB store
         openai_client: OpenAI client instance
         user_ids: Optional list of user IDs to process (None = all active users)
-        default_hours: Default lookback window for users without summaries
+        default_hours: Deprecated (kept for backward compatibility, not used)
         post_limit: Maximum posts to process per group
         dry_run: If True, don't actually create summaries
 
     Returns:
-        Statistics dict
+        Statistics dict with processing results
     """
     from app.infrastructure.agents.summarization_agent import create_summarization_agent
     from app.infrastructure.config.settings import settings
@@ -520,11 +696,17 @@ async def run_personalized_summarization(
             use_structured_output=False
         )
 
-        # Get group time window
-        since = await get_group_time_window(session, users, default_hours)
+        # Get group post ID window (NEW: ID-based selection using hn_id)
+        min_hn_id = await get_group_post_id_window(session, users)
 
-        # Find posts in time window
-        posts = await find_posts_in_time_window(session, since, post_limit)
+        # Find posts by ID range (NEW: ID-based selection using hn_id)
+        posts = await find_posts_by_id_range(
+            session,
+            min_hn_id,
+            post_limit,
+            fallback_to_latest=True,
+            latest_post_limit=10
+        )
 
         if not posts:
             logger.info(f"No posts found for group {prompt_type}")

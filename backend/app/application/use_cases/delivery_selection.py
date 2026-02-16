@@ -49,6 +49,8 @@ class SelectPostsForDeliveryUseCase:
         self,
         user: User,
         max_posts: int = 10,
+        exclude_delivered: bool = True,
+        rank_by_interests: bool = True,
     ) -> UserDeliveryPlan:
         """Select posts to deliver to a specific user.
 
@@ -61,12 +63,16 @@ class SelectPostsForDeliveryUseCase:
            - type = 'story' (skip ask_hn, show_hn)
            - summary IS NOT NULL (must be summarized)
            - is_dead = false
-        4. Sort by score DESC (most relevant first)
-        5. Limit to max_posts
+        4. Optionally exclude already delivered posts (deduplication)
+        5. Sort by score DESC (most relevant first)
+        6. Optionally rank by user interests
+        7. Limit to max_posts
 
         Args:
             user: User model
             max_posts: Maximum posts to select
+            exclude_delivered: Skip already delivered posts (default: True)
+            rank_by_interests: Boost posts matching user interests (default: True)
 
         Returns:
             UserDeliveryPlan with selected posts
@@ -106,12 +112,29 @@ class SelectPostsForDeliveryUseCase:
             )
 
         result = await self.db_session.execute(stmt)
-        posts = result.scalars().all()
+        posts = list(result.scalars().all())
 
         logger.info(
             f"Selected {len(posts)} posts for user {user.id} "
             f"(limit: {max_posts})"
         )
+
+        # Exclude already delivered posts (deduplication)
+        if exclude_delivered and posts:
+            posts = await self._exclude_delivered_posts(user.id, posts)
+            logger.info(
+                f"After deduplication: {len(posts)} posts for user {user.id}"
+            )
+
+        # Rank by user interests
+        if rank_by_interests and user.interests and posts:
+            posts = self._rank_by_interests(posts, user.interests)
+            logger.info(
+                f"Posts ranked by interests for user {user.id}"
+            )
+
+        # Limit again after filtering
+        posts = posts[:max_posts]
 
         # If no posts found and user was never delivered to, this is OK
         # If no posts found and user was delivered to, also OK (no new posts)
@@ -173,6 +196,112 @@ class SelectPostsForDeliveryUseCase:
         )
 
         return delivery_plans
+
+    async def _exclude_delivered_posts(
+        self,
+        user_id: int,
+        posts: List[Post],
+    ) -> List[Post]:
+        """Exclude posts that were already delivered to user.
+
+        Args:
+            user_id: User ID
+            posts: List of posts to filter
+
+        Returns:
+            Filtered list of posts (posts not yet delivered)
+        """
+        from app.infrastructure.database.models import Delivery
+
+        # Get already delivered post IDs
+        post_ids = [p.id for p in posts]
+
+        stmt = select(Delivery.post_id).where(
+            and_(
+                Delivery.user_id == user_id,
+                Delivery.post_id.in_(post_ids)
+            )
+        )
+
+        result = await self.db_session.execute(stmt)
+        delivered_post_ids = {row[0] for row in result.fetchall()}
+
+        # Filter out delivered posts
+        filtered_posts = [p for p in posts if p.id not in delivered_post_ids]
+
+        logger.debug(
+            f"Excluded {len(delivered_post_ids)} already delivered posts "
+            f"for user {user_id}"
+        )
+
+        return filtered_posts
+
+    def _rank_by_interests(
+        self,
+        posts: List[Post],
+        interests: List[str],
+    ) -> List[Post]:
+        """Rank posts by user interests.
+
+        Posts matching user interests are boosted to the top.
+
+        Args:
+            posts: List of posts to rank
+            interests: List of interest keywords
+
+        Returns:
+            Ranked list of posts
+        """
+        if not interests:
+            return posts
+
+        # Calculate interest match score for each post
+        scored_posts = []
+        for post in posts:
+            score = self._calculate_interest_score(post, interests)
+            scored_posts.append((post, score))
+
+        # Sort by interest score (desc), then by HN score (desc)
+        scored_posts.sort(
+            key=lambda x: (x[1], x[0].score),
+            reverse=True
+        )
+
+        ranked_posts = [p for p, _ in scored_posts]
+
+        return ranked_posts
+
+    def _calculate_interest_score(
+        self,
+        post: Post,
+        interests: List[str],
+    ) -> int:
+        """Calculate interest match score for a post.
+
+        Args:
+            post: Post to score
+            interests: List of interest keywords
+
+        Returns:
+            Interest score (0 = no match, higher = better match)
+        """
+        score = 0
+
+        title_lower = post.title.lower() if post.title else ""
+        summary_lower = post.summary.lower() if post.summary else ""
+
+        for interest in interests:
+            interest_lower = interest.lower()
+
+            # Title match: 3 points
+            if interest_lower in title_lower:
+                score += 3
+
+            # Summary match: 1 point
+            if interest_lower in summary_lower:
+                score += 1
+
+        return score
 
     async def filter_by_interests(
         self,
