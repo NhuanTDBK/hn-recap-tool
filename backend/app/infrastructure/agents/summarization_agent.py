@@ -1,6 +1,6 @@
 """Summarization agent for generating article summaries using OpenAI Agents SDK."""
 
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -20,42 +20,77 @@ class SummaryOutput(BaseModel):
     confidence: float = 0.8
 
 
+def load_prompt_content(prompt_name: str) -> str:
+    """Load prompt content from markdown file.
+
+    Args:
+        prompt_name: Name of the prompt file (without extension)
+
+    Returns:
+        Content of the prompt file
+    """
+    # Create a temporary agent to use the _load_prompt method
+    temp_agent = BaseAgent(
+        name="temp",
+        instructions="temp",
+        model=settings.openai_model,
+    )
+    return temp_agent._load_prompt(prompt_name)
+
+
 def create_summarization_agent(
     prompt_type: str = "basic",
     model: str = settings.openai_model,
     use_structured_output: bool = False,
+    user_context: Optional[Dict[str, str]] = None,
 ) -> BaseAgent:
-    """Create summarization agent using OpenAI Agents SDK.
+    """Create summarization agent using two-part prompt structure with caching.
+
+    The agent uses a two-part prompt structure optimized for prompt caching:
+    1. Base system prompt (1200+ tokens, cacheable) - shared across all types
+    2. Type-specific instructions (small delta) - varies by prompt_type
+    3. Dynamic content (article) - always at the end
 
     Args:
         prompt_type: Type of prompt (basic, technical, business, concise, personalized)
         model: LLM model to use
         use_structured_output: Return structured output (Pydantic SummaryOutput)
+        user_context: Optional dict with 'user_topics' and 'user_style' for personalized prompts
 
     Returns:
-        Configured BaseAgent instance (wraps OpenAI Agents SDK Agent)
+        Configured BaseAgent instance with cacheable instructions
     """
-    # Create a temporary agent to load the prompt
-    temp_agent = BaseAgent(
-        name="temp",
-        instructions="temp",
-        model=model,
-    )
+    # Load base system prompt (cacheable, 1200+ tokens)
+    base_system_prompt = load_prompt_content("summarizer_system_base")
 
-    # Load prompt template from markdown file
+    # Load type-specific instructions (small delta)
     try:
-        instructions = temp_agent._load_prompt(f"summarizer_{prompt_type}")
+        type_specific_instructions = load_prompt_content(f"summarizer_{prompt_type}")
     except FileNotFoundError:
         # Fallback to basic if variant not found
         if prompt_type != "basic":
-            instructions = temp_agent._load_prompt("summarizer_basic")
+            type_specific_instructions = load_prompt_content("summarizer_basic")
         else:
             raise
 
-    # Create agent with proper instructions and optional structured output
+    # For personalized prompts, inject user context
+    if prompt_type == "personalized" and user_context:
+        user_topics = user_context.get("user_topics", "Not specified")
+        user_style = user_context.get("user_style", "Standard")
+        type_specific_instructions = type_specific_instructions.replace(
+            "{user_topics}", user_topics
+        ).replace(
+            "{user_style}", user_style
+        )
+
+    # Combine: base (cacheable) + type-specific (small)
+    # Article content will be added by the caller as user message
+    full_instructions = f"{base_system_prompt}\n\n{type_specific_instructions}"
+
+    # Create agent with combined instructions
     agent = BaseAgent(
         name="SummarizationAgent",
-        instructions=instructions,
+        instructions=full_instructions,
         model=model,
         temperature=0.3,  # Lower temperature for consistency
         max_tokens=500,  # Reasonable max for 2-3 sentences

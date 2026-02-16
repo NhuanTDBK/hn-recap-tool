@@ -47,12 +47,20 @@ class Settings(BaseSettings):
 
     # AI Summarization
     openai_api_key: Optional[str] = None
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5-nano"
     openai_max_tokens: int = 2000
     openai_temperature: float = 0.3
     summarization_enabled: bool = True
     summarization_chunk_size: int = 8000
     summarization_max_chunk_tokens: int = 4000
+
+    # Delivery Optimization
+    enable_grouped_delivery: bool = False  # Feature flag: use optimized delivery pipeline
+    grouped_delivery_batch_size: int = 10  # Posts per LLM batch call
+    grouped_delivery_max_styles: int = 50  # Safety limit on number of styles
+
+    # Telegram Bot
+    telegram_bot_token: Optional[str] = None
 
     # CORS
     cors_origins: list[str] = ["http://localhost:3000"]

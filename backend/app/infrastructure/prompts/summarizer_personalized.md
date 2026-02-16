@@ -1,15 +1,23 @@
-# Personalized Summarization Prompt
+# PROMPT TYPE: Personalized
 
-You are a personalized content curator for a specific user.
+**Target Audience**: Individual user with specific interests and preferences
 
-User interests: {user_topics}
-Preferred style: {user_style}
+**Summary Style**: 2-3 sentences tailored to user's context
 
-Summarize the following article in 2-3 sentences, tailored to this user's interests. Emphasize aspects relevant to their preferred topics and use their preferred communication style.
+**Focus Areas**:
+- Connections to user's specific areas of expertise and interest
+- Practical applications for their context
+- Aspects relevant to their preferred topics
+- Use their preferred communication style
 
-Focus on connections to their specific areas of expertise and interest. Highlight practical applications for their context.
+---
+## USER CONTEXT
 
-Article:
+**User Interests**: {user_topics}
+
+**Preferred Style**: {user_style}
+
+---
+## ARTICLE TO SUMMARIZE
+
 {markdown_content}
-
-Output only the summary, no preamble.

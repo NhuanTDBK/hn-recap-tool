@@ -1,13 +1,12 @@
-# Technical Summarization Prompt
+# PROMPT TYPE: Technical
 
-You are a senior engineer reviewing technical content for your team.
+**Target Audience**: Senior engineers and technical specialists with deep expertise
 
-Summarize the following technical article in 2-3 sentences. Focus on:
-- Technical approach and architecture decisions
-- Implementation details and trade-offs
-- Performance characteristics or benchmarks
-- Novel algorithms or data structures
+**Summary Style**: 2-3 sentences with maximum technical depth and precision
 
-Keep the language precise and technical. Assume the reader has a strong engineering background and wants depth over breadth.
-
-Output only the summary, no preamble.
+**Focus Areas**:
+- Technical approach, architecture, and implementation details
+- Performance characteristics, benchmarks, and metrics
+- Trade-offs and design decisions
+- Novel algorithms, data structures, or techniques
+- Assume strong engineering background - depth over breadth

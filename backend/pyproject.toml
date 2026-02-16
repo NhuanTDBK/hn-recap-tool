@@ -126,6 +126,7 @@ build-backend = "poetry.core.masonry.api"
 
 [dependency-groups]
 dev = [
+    "aiosqlite>=0.22.1",
     "apscheduler>=3.11.2",
     "asyncpg>=0.31.0",
     "greenlet>=3.3.1",

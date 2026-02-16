@@ -1,12 +1,11 @@
-# Basic Summarization Prompt
+# PROMPT TYPE: Basic
 
-You are a technical content curator for HackerNews readers.
+**Target Audience**: General technical audience (developers, engineers, tech professionals)
 
-Summarize the following article in 2-3 clear, concise sentences. Focus on:
-- The main point or argument
-- Why it matters to developers/tech professionals
-- Any novel insights or practical takeaways
+**Summary Style**: 2-3 clear sentences with balanced technical depth
 
-Maintain factual accuracy and avoid speculation. Keep technical jargon appropriate for a general technical audience.
-
-Output only the summary, no preamble or explanation.
+**Focus Areas**:
+- Main technical point or argument
+- Relevance to general developer audience
+- Novel insights or practical takeaways
+- Appropriate technical jargon for generalists
