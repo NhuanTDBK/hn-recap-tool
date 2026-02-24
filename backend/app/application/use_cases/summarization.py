@@ -46,7 +46,8 @@ class SummarizationPipeline:
             skip_existing: Whether to skip posts that already have summaries
         """
         self.db_session = db_session
-        self.rocksdb_store = rocksdb_store or RocksDBContentStore()
+        # Summarization only reads content; open RocksDB in read-only mode to avoid lock contention
+        self.rocksdb_store = rocksdb_store or RocksDBContentStore(read_only=True)
         self.prompt_type = prompt_type
         self.skip_existing = skip_existing
 

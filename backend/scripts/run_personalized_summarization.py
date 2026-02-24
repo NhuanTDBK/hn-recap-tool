@@ -104,7 +104,8 @@ async def main_async(
         try:
             # Initialize RocksDB
             content_store = RocksDBContentStore(
-                db_path=str(Path(settings.data_dir) / "content.rocksdb")
+                db_path=str(Path(settings.data_dir) / "content.rocksdb"),
+                read_only=True
             )
 
             # Initialize OpenAI client

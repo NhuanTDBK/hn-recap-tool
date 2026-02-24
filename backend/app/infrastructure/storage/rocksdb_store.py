@@ -16,7 +16,7 @@ import struct
 from pathlib import Path
 from typing import Optional, Tuple
 
-from rocksdict import Rdict, Options
+from rocksdict import AccessType, Options, Rdict
 
 from app.application.interfaces import ContentRepository
 
@@ -26,12 +26,14 @@ logger = logging.getLogger(__name__)
 class RocksDBContentStore(ContentRepository):
     """RocksDB-based content storage with column families."""
 
-    def __init__(self, db_path: str = "data/content.rocksdb"):
+    def __init__(self, db_path: str = "data/content.rocksdb", read_only: bool = False):
         """Initialize RocksDB content store.
 
         Args:
             db_path: Path to RocksDB database directory (relative to project root)
+            read_only: Open the database in read-only mode (no locks, no writes)
         """
+        self.read_only = read_only
         # Convert to absolute path relative to project root
         if not Path(db_path).is_absolute():
             # Find project root (directory containing .git or data/)
@@ -47,18 +49,32 @@ class RocksDBContentStore(ContentRepository):
         else:
             self.db_path = Path(db_path)
 
-        self.db_path.mkdir(parents=True, exist_ok=True)
+        if self.read_only:
+            if not self.db_path.exists():
+                raise FileNotFoundError(
+                    f"RocksDB path does not exist for read-only access: {self.db_path}"
+                )
+        else:
+            self.db_path.mkdir(parents=True, exist_ok=True)
 
         # Configure database options for rocksdict
         # rocksdict has a simpler API - many options have defaults
         opts = Options()
-        opts.create_if_missing(True)
+        opts.create_if_missing(not self.read_only)
+
+        access_type = AccessType.read_only() if self.read_only else AccessType.read_write()
 
         # Open database with key prefixes to simulate column families
         # rocksdict doesn't support full column families like python-rocksdb
-        self.db = Rdict(str(self.db_path), options=opts)
+        self.db = Rdict(str(self.db_path), options=opts, access_type=access_type)
 
-        logger.info(f"Initialized RocksDB content store at {self.db_path}")
+        mode = "read-only" if self.read_only else "read-write"
+        logger.info(f"Initialized RocksDB content store at {self.db_path} ({mode})")
+
+    def _assert_writable(self) -> None:
+        """Raise if attempting a write on a read-only store."""
+        if self.read_only:
+            raise RuntimeError("RocksDBContentStore is read-only; writes are not allowed")
 
     def _encode_key(self, hn_id: int, content_type: str) -> bytes:
         """Encode HN ID and content type to bytes key.
@@ -105,6 +121,7 @@ class RocksDBContentStore(ContentRepository):
             hn_id: HackerNews post ID
             content: Extracted text content
         """
+        self._assert_writable()
         key = self._encode_key(hn_id, "text")
         value = content.encode("utf-8")
         self.db[key] = value
@@ -117,6 +134,7 @@ class RocksDBContentStore(ContentRepository):
             hn_id: HackerNews post ID
             html: Raw HTML content
         """
+        self._assert_writable()
         key = self._encode_key(hn_id, "html")
         value = html.encode("utf-8")
         self.db[key] = value
@@ -129,6 +147,7 @@ class RocksDBContentStore(ContentRepository):
             hn_id: HackerNews post ID
             markdown: Markdown content
         """
+        self._assert_writable()
         key = self._encode_key(hn_id, "markdown")
         value = markdown.encode("utf-8")
         self.db[key] = value
@@ -143,6 +162,7 @@ class RocksDBContentStore(ContentRepository):
             text: Extracted text content
             markdown: Markdown content
         """
+        self._assert_writable()
         await self.save_html_content(hn_id, html)
         await self.save_text_content(hn_id, text)
         await self.save_markdown_content(hn_id, markdown)
@@ -235,6 +255,7 @@ class RocksDBContentStore(ContentRepository):
         Args:
             hn_id: HackerNews post ID
         """
+        self._assert_writable()
         for content_type in ["html", "text", "markdown"]:
             key = self._encode_key(hn_id, content_type)
             if key in self.db:
