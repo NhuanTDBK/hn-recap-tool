@@ -251,7 +251,6 @@ async def find_posts_by_id_range(
                 Post.type == "story",
                 Post.is_dead.is_(False),
                 Post.is_deleted.is_(False),
-                Post.is_crawl_success.is_(True),
             )
         ).order_by(Post.hn_id.desc()).limit(latest_post_limit)
 
@@ -296,7 +295,6 @@ async def find_posts_in_time_window(
             Post.type == "story",
             Post.is_dead.is_(False),
             Post.is_deleted.is_(False),
-            Post.is_crawl_success.is_(True),
         )
     ).order_by(Post.score.desc())
 
@@ -318,7 +316,6 @@ async def find_posts_in_time_window(
                 Post.type == "story",
                 Post.is_dead.is_(False),
                 Post.is_deleted.is_(False),
-                Post.is_crawl_success.is_(True),
             )
         ).order_by(Post.created_at.desc()).limit(latest_post_limit)
 
