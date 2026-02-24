@@ -513,17 +513,19 @@ async def summarize_for_users_in_group(
         "api_calls": 0,
     }
 
+    # Use plain IDs to avoid accessing expired ORM objects after rollback.
+    user_ids = [u.id for u in users]
+
     for post in posts:
+        post_id = post.id
         try:
             # First, check if ANY user in the group needs this post's summary
             # This avoids expensive API calls for posts all users already have
-            user_ids = [u.id for u in users]
-
             # Find which users already have summaries for this post
             stmt = select(Summary.user_id).where(
                 and_(
                     Summary.user_id.in_(user_ids),
-                    Summary.post_id == post.id,
+                    Summary.post_id == post_id,
                     Summary.prompt_type == prompt_type
                 )
             )
@@ -531,7 +533,7 @@ async def summarize_for_users_in_group(
             users_with_summary = set(result.scalars().all())
 
             # Identify which users need the summary
-            users_needing_summary = [u for u in users if u.id not in users_with_summary]
+            users_needing_summary = [uid for uid in user_ids if uid not in users_with_summary]
 
             # If all users already have this summary, skip the API call
             if not users_needing_summary:
@@ -558,7 +560,7 @@ async def summarize_for_users_in_group(
                     {"role": "user", "content": content}
                 ],
                 temperature=0.3,
-                max_tokens=500
+                max_completion_tokens=500
             )
 
             summary_text = response.choices[0].message.content.strip()
@@ -591,11 +593,11 @@ async def summarize_for_users_in_group(
                 cost_per_summary = Decimal(str(actual_tokens * 0.00000015))
 
             # Distribute summary to users in group who need it
-            for user in users_needing_summary:
+            for user_id in users_needing_summary:
                 # Create summary record for this user
                 summary = Summary(
-                    post_id=post.id,
-                    user_id=user.id,  # Personalized to this user
+                    post_id=post_id,
+                    user_id=user_id,  # Personalized to this user
                     prompt_type=prompt_type,
                     summary_text=summary_text,
                     key_points=[],
@@ -614,13 +616,15 @@ async def summarize_for_users_in_group(
             stats["total_cost"] += cost_per_summary
 
             logger.debug(
-                f"✓ Post {post.id}: summarized and distributed to {len(users_needing_summary)} users"
+                f"✓ Post {post_id}: summarized and distributed to {len(users_needing_summary)} users"
             )
 
         except Exception as e:
-            logger.error(f"Failed to summarize post {post.id}: {e}")
+            logger.error(f"Failed to summarize post {post_id}: {e}")
             stats["failed"] += 1
-            await session.rollback()
+            # Rollback only if there are pending ORM changes.
+            if session.new or session.dirty or session.deleted:
+                await session.rollback()
             continue
 
     return stats
