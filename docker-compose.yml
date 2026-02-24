@@ -1,91 +1,154 @@
-version: '3.8'
-
 services:
-  # PostgreSQL database
   postgres:
-    image: postgres:15-alpine
-    container_name: hn-digest-postgres
-    environment:
-      POSTGRES_USER: hn_pal
-      POSTGRES_PASSWORD: hn_pal_dev
-      POSTGRES_DB: hn_pal
+    image: ${POSTGRES_IMAGE:-postgres:15-alpine}
+    container_name: ${POSTGRES_CONTAINER_NAME:-hnpal-postgres}
     ports:
-      - "5433:5432"
+      - "${POSTGRES_EXTERNAL_PORT:-5433}:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-hn_pal}
+      - POSTGRES_USER=${POSTGRES_USER:-hn_pal}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=${POSTGRES_SHARED_BUFFERS:-64MB}"
+      - "-c"
+      - "work_mem=${POSTGRES_WORK_MEM:-4MB}"
+      - "-c"
+      - "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-256MB}"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    restart: ${RESTART_POLICY:-unless-stopped}
+    mem_limit: ${POSTGRES_MEM_LIMIT:-256m}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hn_pal"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    restart: unless-stopped
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hn_pal}"]
+      interval: ${POSTGRES_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${POSTGRES_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${POSTGRES_HEALTHCHECK_RETRIES:-5}
 
-  # pgAdmin for database management
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: hn-digest-pgadmin
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@hnpal.local
-      PGADMIN_DEFAULT_PASSWORD: admin
-      PGADMIN_CONFIG_SERVER_MODE: 'False'
-    ports:
-      - "5050:80"
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
-    depends_on:
-      - postgres
-    restart: unless-stopped
-
-  # Redis cache service
   redis:
-    image: redis:7-alpine
-    container_name: hn-digest-redis
-    ports:
-      - "6379:6379"
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: ${REDIS_CONTAINER_NAME:-hnpal-redis}
+    command:
+      - "redis-server"
+      - "--maxmemory"
+      - "${REDIS_MAX_MEMORY:-48mb}"
+      - "--maxmemory-policy"
+      - "${REDIS_MAX_MEMORY_POLICY:-allkeys-lru}"
     volumes:
       - redis_data:/data
+    restart: ${RESTART_POLICY:-unless-stopped}
+    mem_limit: ${REDIS_MEM_LIMIT:-64m}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    restart: unless-stopped
+      interval: ${REDIS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${REDIS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${REDIS_HEALTHCHECK_RETRIES:-5}
 
-  # Backend API service
-  backend:
+  # --- Background workers ---
+
+  trigger_posts_collection:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: hn-digest-backend
-    ports:
-      - "8000:8000"
+      target: production
+    image: ${WORKER_IMAGE_NAME:-hnpal-app}
+    container_name: ${TRIGGER_POSTS_CONTAINER_NAME:-hnpal-trigger-posts}
+    command: ["python", "${TRIGGER_POSTS_COMMAND_PATH:-scripts/trigger_posts_collection.py}", "--daemon"]
     environment:
-      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
-      - DATABASE_URL=postgresql+asyncpg://hn_pal:hn_pal_dev@postgres:5432/hn_pal
-      - REDIS_URL=redis://redis:6379
-      - DATA_DIR=/app/data
-      - DEBUG=true
-      - LOG_LEVEL=INFO
-    volumes:
-      - ./backend:/app
-      - ./data:/app/data
+      - DATA_DIR=${APP_DATA_DIR:-/app/data}
+      - PYTHONPATH=/app
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hn_pal}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-hn_pal}
+      - REDIS_URL=redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}
+    env_file: .env
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-    restart: unless-stopped
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - rocksdb_data:${APP_DATA_DIR:-/app/data}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    mem_limit: ${TRIGGER_POSTS_MEM_LIMIT:-256m}
+
+  bot:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    image: ${WORKER_IMAGE_NAME:-hnpal-app}  # reuse built image
+    container_name: ${BOT_CONTAINER_NAME:-hnpal-bot}
+    command: ["python", "${BOT_COMMAND_PATH:-scripts/run_bot.py}"]
+    environment:
+      - DATA_DIR=${APP_DATA_DIR:-/app/data}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hn_pal}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-hn_pal}
+      - REDIS_URL=redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - rocksdb_data:${APP_DATA_DIR:-/app/data}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    mem_limit: ${BOT_MEM_LIMIT:-256m}
+
+  summarizer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    image: ${WORKER_IMAGE_NAME:-hnpal-app}  # reuse built image
+    container_name: ${SUMMARIZER_CONTAINER_NAME:-hnpal-summarizer}
+    command: ["python", "${SUMMARIZER_COMMAND_PATH:-scripts/run_personalized_summarization.py}", "--daemon", "--interval", "${SUMMARIZER_INTERVAL_SECONDS:-1800}"]
+    environment:
+      - DATA_DIR=${APP_DATA_DIR:-/app/data}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hn_pal}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-hn_pal}
+      - REDIS_URL=redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - rocksdb_data:${APP_DATA_DIR:-/app/data}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    mem_limit: ${SUMMARIZER_MEM_LIMIT:-256m}
+
+  delivery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    image: ${WORKER_IMAGE_NAME:-hnpal-app}  # reuse built image
+    container_name: ${DELIVERY_CONTAINER_NAME:-hnpal-delivery}
+    command: ["python", "${DELIVERY_COMMAND_PATH:-scripts/run_delivery_daemon.py}", "--daemon"]
+    environment:
+      - DATA_DIR=${APP_DATA_DIR:-/app/data}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hn_pal}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-hn_pal}
+      - REDIS_URL=redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - rocksdb_data:${APP_DATA_DIR:-/app/data}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    mem_limit: ${DELIVERY_MEM_LIMIT:-256m}
 
 volumes:
   postgres_data:
     driver: local
-  pgadmin_data:
-    driver: local
   redis_data:
     driver: local
+  rocksdb_data:
+    driver: local
+
+networks:
+  default:
+    name: ${COMPOSE_NETWORK_NAME:-hnpal-network}
+    driver: bridge

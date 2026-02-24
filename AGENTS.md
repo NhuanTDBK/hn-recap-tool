@@ -124,6 +124,18 @@ python scripts/run_bot.py                        # Start Telegram bot
 
 ## Development Workflow
 
+### Development Process
+
+1. Read `AGENTS.md` and `backend/AGENTS.md` before starting implementation work.
+2. Follow [Semantic Versioning](https://semver.org/) for releases (`MAJOR.MINOR.PATCH`):
+   - `MAJOR`: breaking changes
+   - `MINOR`: backward-compatible features
+   - `PATCH`: backward-compatible fixes
+3. Run Python quality checks with `ruff` before opening a PR:
+   - `.venv/bin/python -m ruff check backend/`
+   - `.venv/bin/python -m ruff format backend/`
+4. Run tests for affected areas before submitting changes.
+
 ### Working Directory Convention
 
 **IMPORTANT**: Always run commands from the project root using the `.venv` Python:

@@ -1,0 +1,27 @@
+# Copy this file to terraform.tfvars and fill in your values
+# terraform.tfvars is gitignored — never commit it
+
+# --- Networking & Deployment ---
+
+aws_region    = "ap-southeast-1"
+aws_profile   = "hnpal"                    # AWS CLI profile from ~/.aws/credentials
+project_name  = "hnpal"
+environment   = "production"
+allowed_ssh_cidr = "0.0.0.0/0"             # Restrict to your IP: run `curl ifconfig.me`
+
+# --- Story 7.3: EC2 ---
+
+key_pair_name     = "hnpal-key"            # EC2 key pair name (must be created in AWS first)
+instance_type     = "t3.micro"             # Free tier eligible
+root_volume_size  = 30                     # GB, free tier: 30 GB/month
+
+# --- Story 7.4: Application Secrets ---
+# These are passed to the app via /opt/hnpal/.env on EC2
+# IMPORTANT: Never commit real secrets to git. Use .gitignore.
+
+postgres_password = "change-me-strong-password"  # PostgreSQL hnpal user password
+openai_api_key    = "sk-proj-..."               # OpenAI API key for GPT models
+telegram_bot_token = "123456789:ABC..."         # Telegram bot token from @BotFather
+telegram_user_id   = "123456789"                # Your Telegram user ID
+hacker_news_api_key = ""                        # Optional: HackerNews API key
+log_level          = "INFO"                     # DEBUG, INFO, WARNING, ERROR

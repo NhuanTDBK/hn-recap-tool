@@ -7,11 +7,11 @@ from typing import List, Dict, Any, Tuple
 
 from markitdown import MarkItDown
 
-from backend.app.domain.entities import Post
-from backend.app.infrastructure.services.enhanced_content_extractor import (
+from app.domain.entities import Post
+from app.infrastructure.services.enhanced_content_extractor import (
     EnhancedContentExtractor,
 )
-from backend.app.infrastructure.services.crawl_status_tracker import CrawlStatusTracker
+from app.infrastructure.services.crawl_status_tracker import CrawlStatusTracker
 
 logger = logging.getLogger(__name__)
 
