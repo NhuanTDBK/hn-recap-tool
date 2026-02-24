@@ -12,6 +12,7 @@ Implements bot commands:
 
 import logging
 from datetime import datetime, timezone
+from html import escape
 
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
@@ -26,6 +27,7 @@ from app.presentation.bot.states import BotStates
 logger = logging.getLogger(__name__)
 
 router = Router()
+UTC = getattr(datetime, "UTC", timezone.utc)  # noqa: UP017
 
 
 async def get_or_create_user(
@@ -89,9 +91,9 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     user = await get_or_create_user(session, telegram_id, username)
 
     # Check if this is first time
-    is_new_user = user.created_at and (
-        datetime.now(timezone.utc) - user.created_at
-    ).total_seconds() < 10
+    is_new_user = (
+        user.created_at and (datetime.now(UTC) - user.created_at).total_seconds() < 10
+    )
 
     if is_new_user:
         # New user: start onboarding
@@ -112,11 +114,20 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         await state.clear()
 
         # Show welcome back message
+        display_name = escape(username or "friend")
+        status = escape(user.status or "unknown")
+        delivery_style = escape(user.delivery_style or "unknown")
+        interests = (
+            ", ".join(escape(item) for item in user.interests)
+            if user.interests
+            else "None set"
+        )
+
         await message.answer(
-            f"👋 <b>Welcome back, {username or 'friend'}!</b>\n\n"
-            f"Status: <b>{user.status}</b>\n"
-            f"Delivery style: <b>{user.delivery_style}</b>\n"
-            f"Interests: {', '.join(user.interests) if user.interests else 'None set'}\n\n"
+            f"👋 <b>Welcome back, {display_name}!</b>\n\n"
+            f"Status: <b>{status}</b>\n"
+            f"Delivery style: <b>{delivery_style}</b>\n"
+            f"Interests: {interests}\n\n"
             "Use /help to see available commands."
         )
 
@@ -141,9 +152,7 @@ async def cmd_pause(message: Message, session: AsyncSession):
     user = result.scalar_one_or_none()
 
     if not user:
-        await message.answer(
-            "❌ User not found. Please use /start to register first."
-        )
+        await message.answer("❌ User not found. Please use /start to register first.")
         return
 
     # Toggle status
@@ -186,9 +195,7 @@ async def cmd_resume(message: Message, session: AsyncSession):
     user = result.scalar_one_or_none()
 
     if not user:
-        await message.answer(
-            "❌ User not found. Please use /start to register first."
-        )
+        await message.answer("❌ User not found. Please use /start to register first.")
         return
 
     # Set status to active
@@ -196,8 +203,7 @@ async def cmd_resume(message: Message, session: AsyncSession):
     await session.commit()
 
     await message.answer(
-        "▶️ <b>Digests resumed!</b>\n\n"
-        "You'll receive your next digest tomorrow morning."
+        "▶️ <b>Digests resumed!</b>\n\nYou'll receive your next digest tomorrow morning."
     )
 
 
@@ -260,9 +266,7 @@ async def cmd_saved(message: Message, session: AsyncSession):
     user = result.scalar_one_or_none()
 
     if not user:
-        await message.answer(
-            "❌ User not found. Please use /start to register first."
-        )
+        await message.answer("❌ User not found. Please use /start to register first.")
         return
 
     # TODO: Implement bookmark system
@@ -295,9 +299,7 @@ async def cmd_mystats(message: Message, session: AsyncSession):
     user = result.scalar_one_or_none()
 
     if not user:
-        await message.answer(
-            "❌ User not found. Please use /start to register first."
-        )
+        await message.answer("❌ User not found. Please use /start to register first.")
         return
 
     # Get token usage stats
@@ -323,7 +325,7 @@ async def cmd_mystats(message: Message, session: AsyncSession):
 
 <b>Account:</b>
 Status: <b>{user.status}</b>
-Joined: {user.created_at.strftime('%Y-%m-%d') if user.created_at else 'Unknown'}
+Joined: {user.created_at.strftime("%Y-%m-%d") if user.created_at else "Unknown"}
 
 <b>Delivery:</b>
 Posts received (last 7 days): <b>{delivery_count}</b>
@@ -335,7 +337,7 @@ Total API calls: <b>{total_requests}</b>
 Total cost: <b>${total_cost:.4f}</b>
 
 <b>Interests:</b>
-{', '.join(user.interests) if user.interests else 'None set (use /settings)'}
+{", ".join(user.interests) if user.interests else "None set (use /settings)"}
     """
 
     await message.answer(stats_text)
@@ -426,7 +428,9 @@ async def handle_onboarding(message: Message, state: FSMContext, session: AsyncS
             user.interests = interests[:5]  # Limit to 5 interests
             await session.commit()
 
-            logger.info(f"Updated user interests: user_id={user.id}, interests={interests[:5]}")
+            logger.info(
+                f"Updated user interests: user_id={user.id}, interests={interests[:5]}"
+            )
 
         # Complete onboarding
         await state.set_state(BotStates.IDLE)

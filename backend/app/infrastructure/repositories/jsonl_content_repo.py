@@ -6,7 +6,7 @@ import logging
 
 import aiofiles
 
-from backend.app.application.interfaces import ContentRepository
+from app.application.interfaces import ContentRepository
 
 logger = logging.getLogger(__name__)
 

@@ -12,12 +12,8 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.jobs.hourly_posts_collector import HourlyPostsCollectorJob
-from app.infrastructure.jobs.hourly_delivery_job import HourlyDeliveryJob
 from app.infrastructure.jobs.scheduler import JobScheduler
 from app.infrastructure.repositories.postgres.post_repo import PostgresPostRepository
-from app.infrastructure.repositories.postgres.delivery_repo import (
-    PostgresDeliveryRepository,
-)
 from app.infrastructure.services.firebase_hn_client import FirebaseHNClient
 from app.infrastructure.storage.rocksdb_store import RocksDBContentStore
 
@@ -70,17 +66,6 @@ class SchedulerFactory:
         # Create and register scheduler
         scheduler = JobScheduler()
         scheduler.register_hourly_collector(hourly_collector)
-
-        # Create hourly delivery job if enabled
-        if enable_delivery:
-            delivery_repo = PostgresDeliveryRepository(db_session)
-            hourly_delivery = HourlyDeliveryJob(
-                db_session=db_session,
-                delivery_repo=delivery_repo,
-                max_posts_per_user=max_posts_per_user,
-            )
-            scheduler.register_hourly_delivery(hourly_delivery)
-            logger.info("Hourly delivery job registered")
 
         logger.info("Job scheduler created and configured")
         return scheduler

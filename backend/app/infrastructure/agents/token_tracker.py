@@ -76,7 +76,7 @@ class TokenTracker:
         """
         from sqlalchemy import and_, select, update
 
-        from backend.app.infrastructure.database.models import (
+        from app.infrastructure.database.models import (
             AgentCall,
             UserTokenUsage,
         )
@@ -157,7 +157,7 @@ class TokenTracker:
         """
         from sqlalchemy import and_, select
 
-        from backend.app.infrastructure.database.models import UserTokenUsage
+        from app.infrastructure.database.models import UserTokenUsage
 
         stmt = select(UserTokenUsage).where(UserTokenUsage.user_id == user_id)
 

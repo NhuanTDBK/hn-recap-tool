@@ -467,50 +467,6 @@ python scripts/run_personalized_summarization.py
 python scripts/run_delivery_pipeline.py
 ```
 
-### Common Tasks
-
-#### Collect HackerNews Posts
-```bash
-python scripts/trigger_posts_collection.py
-```
-Fetches top 30 posts from HN API and stores in PostgreSQL + RocksDB.
-
-#### Extract Content from Articles
-```bash
-python scripts/run_content_extraction.py
-```
-Uses Trafilatura to extract HTML/text from article URLs. Results cached in RocksDB.
-
-#### Generate Summaries
-```bash
-python scripts/run_personalized_summarization.py
-```
-Creates summaries for each user's preferred style(s). Uses OpenAI Agents SDK.
-
-#### Send to Telegram
-```bash
-python scripts/run_delivery_pipeline.py
-```
-Delivers summaries to users via Telegram bot with interactive buttons.
-
-#### Check Token Usage
-```bash
-# View costs from last 24 hours
-sqlite3 data/token_usage.db "SELECT * FROM usage_summary ORDER BY date DESC LIMIT 1;"
-
-# View per-user breakdown
-python -c "
-from backend.app.infrastructure.database.models import UserTokenUsage
-# Query database for UserTokenUsage records
-"
-```
-
-#### Test Telegram Bot
-```bash
-python scripts/test_telegram.py
-```
-Sends test message and verifies bot connectivity.
-
 ## Development
 
 ### Setting Up Development Environment
