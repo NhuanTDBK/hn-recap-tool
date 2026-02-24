@@ -549,9 +549,9 @@ async def summarize_for_users_in_group(
                 continue
 
             # Call OpenAI API once for this post (with prompt caching)
-            response = openai_client.chat.completions.create(
-                model=model,
-                messages=[
+            request_kwargs = {
+                "model": model,
+                "messages": [
                     {
                         "role": "system",
                         "content": agent_instructions,
@@ -559,9 +559,13 @@ async def summarize_for_users_in_group(
                     },
                     {"role": "user", "content": content}
                 ],
-                temperature=0.3,
-                max_completion_tokens=500
-            )
+                "max_completion_tokens": 500,
+            }
+            # GPT-5 models currently only support the default temperature.
+            if not model.startswith("gpt-5"):
+                request_kwargs["temperature"] = 0.3
+
+            response = openai_client.chat.completions.create(**request_kwargs)
 
             summary_text = response.choices[0].message.content.strip()
             stats["api_calls"] += 1
