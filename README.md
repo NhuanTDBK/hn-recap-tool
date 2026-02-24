@@ -282,40 +282,52 @@ hackernews_digest/
 │   │   │   └── schemas/               # Pydantic models
 │   │   │
 │   │   └── main.py                    # FastAPI app entry
-│   │
-│   ├── alembic/                       # Database migrations
-│   ├── tests/                         # Test suite
-│   │   ├── unit/
-│   │   └── integration/
-│   ├── scripts/                       # Automation scripts
-│   │   ├── trigger_posts_collection.py
-│   │   ├── run_personalized_summarization.py
-│   │   ├── run_bot.py
-│   │   ├── run_delivery_pipeline.py
-│   │   └── test_telegram.py
-│   ├── pyproject.toml                 # Poetry config
-│   ├── Dockerfile                     # Container definition
-│   ├── alembic.ini
-│   ├── .env.example
-│   └── README.md
-│
-├── data/
+│   
+├── data/                              # Local storage
 │   ├── content.rocksdb/               # Article content storage
-│   └── test_posts.json
+│   └── test_posts.json                 # Sample posts for tests
 │
 ├── docs/                              # Project documentation
-│   ├── spec.md                        # Product specification
-│   ├── prd.md                         # Product requirements
+│   ├── activities/
+│   ├── api/
 │   ├── architecture/
-│   └── stories/
+│   ├── design/
+│   ├── epics/
+│   ├── stories/
+│   ├── brainstorming-session-results.md
+│   ├── hn_api.md
+│   ├── prd.md
+│   ├── spec.md
+│   └── sprint-plan.md
 │
-├── docker-compose.yml                 # Development services
-├── pyproject.toml                     # Root config
-├── .env.example
+├── infra/                             # Terraform infrastructure
+│   ├── ec2.tf
+│   ├── iam.tf
+│   ├── main.tf
+│   ├── outputs.tf
+│   ├── s3.tf
+│   ├── variables.tf
+│   ├── terraform.tfvars
+│   ├── terraform.tfvars.example
+│   ├── terraform.tfstate
+│   ├── terraform.tfstate.backup
+│   └── scripts/
+│       └── user-data.sh
+│
+├── scripts/                           # Devops helpers
+│   ├── deploy-auto.sh
+│   └── deploy-update.sh
+│
+├── docker-compose.yml                 # Development services orchestration
+├── .github/                           # GitHub tooling
+│   └── chatmodes/
+├── .vscode/                           # Editor settings
 ├── AGENTS.md                          # AI agent guide
-└── README.md                          # This file
+├── README.md                          # This file
+├── uv.lock                            # Dependency lock
+├── pyproject.toml                     # Workspace config
+└── .env.example                       # Environment template
 ```
-
 ## Configuration
 
 ### Environment Variables Reference

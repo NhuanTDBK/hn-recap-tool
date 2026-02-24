@@ -17,18 +17,23 @@ hackernews_digest/
 │   │   ├── infrastructure/  # External integrations
 │   │   └── presentation/    # API and Bot interfaces
 │   ├── alembic/          # Database migrations
-│   ├── scripts/          # Automation scripts
+│   ├── scripts/           # Backend automation scripts
 │   ├── tests/            # Test suite
 │   └── AGENTS.md         # Detailed backend agent guide ⭐
 ├── data/                 # Local data storage
-│   └── content.rocksdb/  # Content storage (HTML/Markdown)
-├── docs/                 # Documentation
-│   ├── spec.md           # Product specification
-│   └── stories/          # User stories
+│   ├── content.rocksdb/  # Content storage (HTML/Markdown)
+│   └── test_posts.json    # Sample posts for tests
+├── docs/                 # Documentation and plans (spec, prd, stories, architecture notes)
+├── infra/                # Terraform + helper scripts for AWS deployment
+├── scripts/              # Devops helpers (deploy-auto.sh, deploy-update.sh)
 ├── docker-compose.yml    # Local development services
-└── AGENTS.md             # This file - project overview
+├── .github/
+│   └── chatmodes/
+├── .vscode/              # Editor settings
+├── AGENTS.md             # This file - project overview
+├── README.md             # Project landing page
+└── uv.lock               # Workspace lockfile
 ```
-
 ## Quick Start
 
 ### For Backend Development
