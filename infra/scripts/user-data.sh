@@ -60,11 +60,18 @@ sudo -u ubuntu git clone https://github.com/NhuanTDBK/hn-recap-tool.git . || tru
 echo "Creating .env file..."
 cat > /opt/hnpal/.env << EOF
 DATABASE_URL=postgresql+asyncpg://hn_pal:${POSTGRES_PASSWORD}@postgres:5432/hn_pal
+POSTGRES_USER=hn_pal
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+POSTGRES_DB=hn_pal
 REDIS_URL=redis://redis:6379
 OPENAI_API_KEY=${OPENAI_API_KEY}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID}
 LOG_LEVEL=${LOG_LEVEL}
+DATA_SOURCE_PATH=/mnt/s3data
+DATA_DIR=/mnt/s3data
+HOST_DATA_DIR=/mnt/s3data
+APP_DATA_DIR=/mnt/s3data
 LANGFUSE_ENABLED=false
 OPENAI_AGENTS_DISABLE_TRACING=1
 EOF
@@ -80,12 +87,12 @@ sleep 5
 # Build and start services
 echo "Building and starting services..."
 cd /opt/hnpal
-sudo -u ubuntu docker compose -f docker-compose.prod.yml build app || true
-sudo -u ubuntu docker compose -f docker-compose.prod.yml up -d
+sudo -u ubuntu docker compose build bot summarizer delivery trigger_posts_collection || true
+sudo -u ubuntu docker compose up -d postgres redis bot summarizer delivery trigger_posts_collection
 
 # Run migrations (wait for postgres to be ready)
 echo "Running database migrations..."
 sleep 10
-sudo -u ubuntu docker compose -f docker-compose.prod.yml exec -T app alembic upgrade head || true
+sudo -u ubuntu docker compose run --rm bot alembic upgrade head || true
 
 echo "=== EC2 bootstrap complete $(date) ==="

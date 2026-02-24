@@ -1,7 +1,7 @@
 #!/bin/bash
 # Rolling update script for HackerNews Digest
 # Deploys latest code with docker compose v2
-# Usage: ./scripts/deploy-update.sh [--skip-migrations]
+# Usage: ./scripts/deploy-update.sh [--skip-migrations] [--branch <name>]
 
 set -euo pipefail
 
@@ -11,13 +11,34 @@ echo "=== Starting deployment $(date) ==="
 
 # Parse arguments
 SKIP_MIGRATIONS=false
-if [[ "${1:-}" == "--skip-migrations" ]]; then
-  SKIP_MIGRATIONS=true
-fi
+BRANCH="main"
 
-# Pull latest code
-echo "Pulling latest code..."
-git pull origin main
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-migrations)
+      SKIP_MIGRATIONS=true
+      shift
+      ;;
+    --branch)
+      BRANCH="${2:-}"
+      if [[ -z "$BRANCH" ]]; then
+        echo "ERROR: --branch requires a value"
+        exit 1
+      fi
+      shift 2
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1"
+      exit 1
+      ;;
+  esac
+done
+
+# Sync latest code from origin
+echo "Syncing code from origin/${BRANCH}..."
+git fetch origin "${BRANCH}"
+git reset --hard "origin/${BRANCH}"
+git clean -fd
 
 # Build images
 echo "Building application images..."

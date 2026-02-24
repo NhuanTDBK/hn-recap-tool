@@ -163,6 +163,27 @@ python -m alembic upgrade head
 python -m alembic revision --autogenerate -m "description"
 ```
 
+### Scripts Guidelines
+
+Deployment scripts live in `scripts/` at the project root.
+
+```bash
+# Full automated deploy (infra + app + .env sync + remote alembic)
+./scripts/deploy-auto.sh
+
+# App-only deploy (skip terraform apply)
+./scripts/deploy-auto.sh --skip-infra
+
+# Skip migration only when explicitly intended
+./scripts/deploy-auto.sh --skip-migrations
+```
+
+Remote deploy behavior:
+- Use `docker compose` (v2) with `docker-compose.yml`
+- Always run `alembic upgrade head` during normal deploys
+- Sync code from `origin/<branch>` with hard reset to avoid drift on VM
+- Keep secrets in `.env` only (never commit)
+
 ### Dependencies
 
 ```bash

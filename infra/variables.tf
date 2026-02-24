@@ -45,7 +45,7 @@ variable "root_volume_size" {
   default     = 30
 }
 
-# Story 7.4: Application Secrets (passed to docker-compose.prod.yml via .env)
+# Story 7.4: Application Secrets (passed to docker-compose.yml via .env)
 
 variable "postgres_password" {
   description = "PostgreSQL password for hnpal user"

@@ -115,7 +115,6 @@ infra/
 ├── terraform.tfvars.example # Example config (no secrets)
 ├── scripts/
 │   ├── user-data.sh         # EC2 bootstrap + Docker install + S3 mount
-│   └── docker-compose.prod.yml  # Production compose (app + postgres + redis)
 └── README.md                # Documentation
 ```
 
@@ -201,7 +200,7 @@ Bot runs in **polling mode** — Telegram queues messages for offline bots (24-h
 **Goal:** Deploy the fully Dockerized application with zero-message-loss update strategy.
 
 **Acceptance Criteria:**
-1. `docker-compose.prod.yml` runs all 3 services: app, PostgreSQL 15, Redis 7
+1. `docker-compose.yml` runs all 3 services: app, PostgreSQL 15, Redis 7
 2. App container built from Dockerfile (Python 3.11, uv, application code)
 3. PostgreSQL memory-tuned for t3.micro (`shared_buffers=64MB`, `work_mem=4MB`)
 4. Application code deployed via git clone to `/opt/hnpal/`
