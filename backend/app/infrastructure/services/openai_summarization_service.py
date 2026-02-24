@@ -12,8 +12,8 @@ from typing import List, Optional
 
 from agents import Agent, Runner, ModelSettings, WebSearchTool
 
-from backend.app.application.interfaces import SummarizationService
-from backend.app.infrastructure.config.settings import settings
+from app.application.interfaces import SummarizationService
+from app.infrastructure.config.settings import settings
 
 logger = logging.getLogger(__name__)
 

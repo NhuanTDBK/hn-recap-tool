@@ -3,8 +3,15 @@
 Loads configuration from environment variables and .env file.
 """
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import logging
+from pathlib import Path
 from typing import Optional
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -33,7 +40,7 @@ class Settings(BaseSettings):
     redis_ttl: int = 3600  # 1 hour default TTL
 
     # Data Storage
-    data_dir: str = "../data"
+    data_dir: str = "data"
     user_data_file: str = "users/user-profiles.jsonl"
 
     # HackerNews API
@@ -67,6 +74,35 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+
+    @field_validator("data_dir", mode="before")
+    @classmethod
+    def resolve_data_dir(cls, value: str) -> str:
+        """Resolve data directory to an absolute path.
+
+        Preference order:
+        1) If absolute, keep as-is.
+        2) If relative, resolve against the project root (directory containing
+           .git or data). If not found, fall back to cwd.
+        """
+
+        path = Path(value)
+        if path.is_absolute():
+            resolved = path
+        else:
+            current = Path(__file__).resolve()
+            project_root: Optional[Path] = None
+            while current.parent != current:
+                if (current / ".git").exists() or (current / "data").exists():
+                    project_root = current
+                    break
+                current = current.parent
+
+            base = project_root or Path.cwd()
+            resolved = (base / path).resolve()
+
+        logger.info("Resolved data_dir to %s", resolved)
+        return str(resolved)
 
 
 # Global settings instance

@@ -7,9 +7,9 @@ import logging
 
 import aiofiles
 
-from backend.app.domain.entities import Post
-from backend.app.application.interfaces import PostRepository
-from backend.app.infrastructure.repositories.jsonl_helpers import (
+from app.domain.entities import Post
+from app.application.interfaces import PostRepository
+from app.infrastructure.repositories.jsonl_helpers import (
     read_jsonl,
     write_jsonl,
     write_jsonl_batch,
