@@ -618,68 +618,87 @@ python -m alembic history
 
 ## Database Schema
 
-### Core Tables
+```mermaid
+erDiagram
+    POSTS {
+        int id PK "Auto-increment"
+        int hn_id "Hacker News ID (unique)"
+        string title
+        string url
+        int score
+        int comment_count
+        timestamp created_at
+        bool has_html
+        bool has_text
+        bool is_crawl_success
+        string summary
+    }
 
-**posts**
-- `id` (PK): Auto-increment ID
-- `hn_id` (UNIQUE): Hacker News post ID
-- `title`: Article title
-- `url`: Article URL
-- `score`: Upvote count
-- `comment_count`: Number of comments
-- `created_at`: Post creation timestamp
-- `has_html`, `has_text`: Content extraction flags
-- `is_crawl_success`: Extraction success status
-- `summary`: Cached summary text
+    USERS {
+        int id PK
+        int telegram_id "Unique chat/user ID"
+        string username
+        json interests
+        string status
+        json summary_preferences
+        string delivery_style
+        bool memory_enabled
+        timestamp created_at
+        timestamp updated_at
+    }
 
-**users**
-- `id` (PK): Auto-increment ID
-- `telegram_id` (UNIQUE): Telegram user/chat ID
-- `username`: Telegram username
-- `interests`: JSON array of interests
-- `status`: active/paused/inactive
-- `summary_preferences`: JSON preferences
-- `delivery_style`: basic/technical/business/concise/personalized
-- `memory_enabled`: Bool for conversation memory
-- `created_at`, `updated_at`: Timestamps
+    SUMMARIES {
+        int id PK
+        int post_id FK
+        int user_id FK
+        string prompt_type
+        text summary_text
+        decimal cost_usd
+        int token_count
+        int rating
+        timestamp created_at
+    }
 
-**summaries**
-- `id` (PK): Auto-increment ID
-- `post_id` (FK): Reference to post
-- `user_id` (FK): Reference to user
-- `prompt_type`: Style used for summary
-- `summary_text`: Generated summary
-- `cost_usd`: API cost for this summary
-- `rating`: User rating (1-5 or null)
-- `token_count`: Tokens used
-- `created_at`: Generation timestamp
+    DELIVERIES {
+        int id PK
+        int user_id FK
+        int post_id FK
+        string batch_id
+        string message_id
+        string reaction
+        timestamp delivered_at
+    }
 
-**deliveries**
-- `id` (PK): Auto-increment ID
-- `user_id` (FK): Recipient user
-- `post_id` (FK): Post delivered
-- `batch_id`: Batch delivery identifier
-- `message_id`: Telegram message ID
-- `reaction`: User reaction (thumbs_up/thumbs_down/none)
-- `delivered_at`: Delivery timestamp
+    CONVERSATIONS {
+        int id PK
+        int user_id FK
+        int post_id FK
+        json messages
+        json token_usage
+        timestamp created_at
+        timestamp updated_at
+    }
 
-**conversations**
-- `id` (PK): Auto-increment ID
-- `user_id` (FK): Conversation participant
-- `post_id` (FK): Post being discussed
-- `messages`: JSON array of messages
-- `token_usage`: JSON token counts
-- `created_at`, `updated_at`: Timestamps
+    USER_TOKEN_USAGE {
+        int id PK
+        int user_id FK
+        date day
+        string model
+        int input_tokens
+        int output_tokens
+        decimal cost_usd
+    }
 
-**user_token_usage**
-- `id` (PK): Auto-increment ID
-- `user_id` (FK): User reference
-- `date`: Date of usage
-- `model`: Model used
-- `input_tokens`, `output_tokens`: Token counts
-- `cost_usd`: Daily cost
+    POSTS ||--o{ SUMMARIES : has
+    USERS ||--o{ SUMMARIES : generates
+    USERS ||--o{ DELIVERIES : receives
+    POSTS ||--o{ DELIVERIES : references
+    USERS ||--o{ CONVERSATIONS : participates
+    POSTS ||--o{ CONVERSATIONS : discusses
+    USERS ||--o{ USER_TOKEN_USAGE : tracks
+```
 
-See `backend/app/infrastructure/database/models.py` for complete schema definition.
+See `backend/app/infrastructure/database/models.py` for the definitive schema implementation.
 
 ## Troubleshooting
 
