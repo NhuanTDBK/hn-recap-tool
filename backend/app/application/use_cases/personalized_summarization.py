@@ -578,20 +578,6 @@ async def summarize_for_users_in_group(
         "api_calls": 0,
     }
 
-    # Optional Langfuse for group-level tracing (no user_id — one call serves all users)
-    langfuse = None
-    if agent_settings.langfuse_enabled and agent_settings.langfuse_public_key:
-        try:
-            from langfuse import Langfuse
-
-            langfuse = Langfuse(
-                public_key=agent_settings.langfuse_public_key,
-                secret_key=agent_settings.langfuse_secret_key,
-                host=agent_settings.langfuse_host,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to initialize Langfuse: {e}")
-
     # Use plain IDs to avoid accessing expired ORM objects after rollback.
     user_ids = [u.id for u in users]
 
@@ -631,19 +617,6 @@ async def summarize_for_users_in_group(
                 continue
 
             # Run agent via OpenAI Agents SDK — one call per post, shared across group
-            trace = None
-            generation = None
-            if langfuse:
-                trace = langfuse.trace(
-                    name="summarize_group_post",
-                    metadata={"prompt_type": prompt_type, "post_id": str(post_id)},
-                )
-                generation = trace.generation(
-                    name="agent_execution",
-                    model=base_agent.model,
-                    input=content,
-                )
-
             run_result = await Runner.run(base_agent.agent, input=content)
 
             summary_text = str(run_result.final_output).strip()
@@ -659,16 +632,6 @@ async def summarize_for_users_in_group(
             input_cost = input_tokens * 0.15 / 1_000_000
             output_cost = output_tokens * 0.60 / 1_000_000
             cost_per_summary = Decimal(str(input_cost + output_cost))
-
-            if generation:
-                generation.end(
-                    output=summary_text,
-                    usage={
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "total_tokens": actual_tokens,
-                    },
-                )
 
             # Distribute summary to users in group who need it
             for user_id in users_needing_summary:
