@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 
 async def deliver_summaries(
-    user_id: int = None, dry_run: bool = False, max_posts: int = 10
+    user_id: int = None, dry_run: bool = False, max_posts: int = 100
 ):
     """Deliver existing summaries to users.
 
@@ -215,7 +215,7 @@ def main():
         "--dry-run", action="store_true", help="Dry run (don't send messages)"
     )
     parser.add_argument(
-        "--max-posts", type=int, default=10, help="Maximum posts per user (default: 10)"
+        "--max-posts", type=int, default=100, help="Maximum posts per user (default: 100)"
     )
 
     args = parser.parse_args()
