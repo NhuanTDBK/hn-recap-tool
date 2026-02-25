@@ -21,8 +21,8 @@ Usage:
     # Limit posts per group
     python scripts/run_personalized_summarization.py --post-limit 50
 
-    # Adjust time window for first-time users
-    python scripts/run_personalized_summarization.py --default-hours 12
+    # Override default 48-hour lookback window
+    python scripts/run_personalized_summarization.py --default-hours 24
 
     # Dry run
     python scripts/run_personalized_summarization.py --dry-run
@@ -34,8 +34,8 @@ Usage:
     python scripts/run_personalized_summarization.py --daemon --interval 30
 """
 
-import asyncio
 import argparse
+import asyncio
 import logging
 import signal
 import sys
@@ -50,14 +50,15 @@ from openai import OpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.application.use_cases.personalized_summarization import run_personalized_summarization
+from app.application.use_cases.personalized_summarization import (
+    run_personalized_summarization,
+)
 from app.infrastructure.config.settings import settings
 from app.infrastructure.storage.rocksdb_store import RocksDBContentStore
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ async def main_async(
     default_hours: int = 6,
     post_limit: int = None,
     dry_run: bool = False,
-    verbose: bool = False
+    verbose: bool = False,
 ):
     """Main async function.
 
@@ -78,14 +79,14 @@ async def main_async(
         dry_run: If True, don't actually create summaries
         verbose: Enable verbose logging
     """
-    print("="*80)
+    print("=" * 80)
     print("PERSONALIZED SUMMARIZATION PIPELINE")
-    print("="*80)
+    print("=" * 80)
     print(f"User IDs: {user_ids or 'all active users'}")
-    print(f"Default time window: {default_hours} hours")
+    print(f"Lookback window: {default_hours} hours")
     print(f"Post limit per group: {post_limit or 'unlimited'}")
     print(f"Dry run: {dry_run}")
-    print("="*80 + "\n")
+    print("=" * 80 + "\n")
 
     # Create async engine
     engine = create_async_engine(
@@ -104,8 +105,7 @@ async def main_async(
         try:
             # Initialize RocksDB
             content_store = RocksDBContentStore(
-                db_path=str(Path(settings.data_dir) / "content.rocksdb"),
-                read_only=True
+                db_path=str(Path(settings.data_dir) / "content.rocksdb"), read_only=True
             )
 
             # Initialize OpenAI client
@@ -119,7 +119,7 @@ async def main_async(
                 user_ids=user_ids,
                 default_hours=default_hours,
                 post_limit=post_limit,
-                dry_run=dry_run
+                dry_run=dry_run,
             )
 
             # Print per-group breakdown
@@ -131,7 +131,7 @@ async def main_async(
                     print(f"    Users: {group_stats['users']}")
                     print(f"    Posts processed: {group_stats['posts']}")
                     print(f"    Summaries created: {group_stats['summaries']}")
-                    if not dry_run and 'tokens' in group_stats:
+                    if not dry_run and "tokens" in group_stats:
                         print(f"    Tokens: {group_stats['tokens']}")
                         print(f"    Cost: ${group_stats['cost']:.4f}")
                 print("-" * 80)
@@ -147,7 +147,7 @@ async def run_once(
     default_hours: int,
     post_limit: int,
     dry_run: bool,
-    verbose: bool
+    verbose: bool,
 ) -> dict:
     """Run summarization once and return stats."""
     start_time = datetime.utcnow()
@@ -157,7 +157,7 @@ async def run_once(
         default_hours=default_hours,
         post_limit=post_limit,
         dry_run=dry_run,
-        verbose=verbose
+        verbose=verbose,
     )
 
     end_time = datetime.utcnow()
@@ -179,7 +179,7 @@ async def run_daemon(
     post_limit: int,
     dry_run: bool,
     verbose: bool,
-    interval: int
+    interval: int,
 ):
     """Run scheduler as daemon (keeps running until interrupted).
 
@@ -208,13 +208,15 @@ async def run_daemon(
         # Create a wrapper job function
         async def summarization_job():
             try:
-                logger.info(f"Running summarization job at {datetime.utcnow().isoformat()}")
+                logger.info(
+                    f"Running summarization job at {datetime.utcnow().isoformat()}"
+                )
                 await main_async(
                     user_ids=user_ids,
                     default_hours=default_hours,
                     post_limit=post_limit,
                     dry_run=dry_run,
-                    verbose=verbose
+                    verbose=verbose,
                 )
             except Exception as e:
                 logger.error(f"Summarization job failed: {e}", exc_info=True)
@@ -250,10 +252,12 @@ async def run_daemon(
 
                 if time_until_next > 0:
                     try:
-                        await asyncio.wait_for(stop_event.wait(), timeout=time_until_next)
+                        await asyncio.wait_for(
+                            stop_event.wait(), timeout=time_until_next
+                        )
                         # If we get here, stop_event was set
                         break
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Time to run the job
                         await summarization_job()
                         next_run = asyncio.get_event_loop().time() + interval
@@ -276,40 +280,37 @@ def parse_args():
         "--user-ids",
         type=str,
         default=None,
-        help="Comma-separated list of user IDs to process (e.g., '1,2,3')"
+        help="Comma-separated list of user IDs to process (e.g., '1,2,3')",
     )
     parser.add_argument(
         "--default-hours",
         type=int,
-        default=6,
-        help="Default lookback window for users without summaries (default: 6)"
+        default=48,
+        help="Lookback window in hours for post discovery (default: 48)",
     )
     parser.add_argument(
         "--post-limit",
         type=int,
         default=None,
-        help="Limit posts per group (default: unlimited)"
+        help="Limit posts per group (default: unlimited)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Dry run (don't actually create summaries)"
+        help="Dry run (don't actually create summaries)",
     )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument(
-        "--verbose",
+        "--daemon",
+        "-d",
         action="store_true",
-        help="Enable verbose logging"
-    )
-    parser.add_argument(
-        "--daemon", "-d",
-        action="store_true",
-        help="Run as daemon with periodic scheduler (keeps running)"
+        help="Run as daemon with periodic scheduler (keeps running)",
     )
     parser.add_argument(
         "--interval",
         type=int,
         default=3600,
-        help="Interval in seconds for scheduler (default: 3600 = 1 hour)"
+        help="Interval in seconds for scheduler (default: 3600 = 1 hour)",
     )
     return parser.parse_args()
 
@@ -343,34 +344,42 @@ def main():
     else:
         logger.info("MANUAL PERSONALIZED SUMMARIZATION")
     logger.info("=" * 80)
-    logger.info(f"Settings: user_ids={user_ids}, default_hours={args.default_hours}, post_limit={args.post_limit}, dry_run={args.dry_run}")
+    logger.info(
+        f"Settings: user_ids={user_ids}, lookback_hours={args.default_hours}, post_limit={args.post_limit}, dry_run={args.dry_run}"
+    )
 
     # Run
     try:
         if args.daemon:
-            asyncio.run(run_daemon(
-                user_ids=user_ids,
-                default_hours=args.default_hours,
-                post_limit=args.post_limit,
-                dry_run=args.dry_run,
-                verbose=args.verbose,
-                interval=args.interval
-            ))
+            asyncio.run(
+                run_daemon(
+                    user_ids=user_ids,
+                    default_hours=args.default_hours,
+                    post_limit=args.post_limit,
+                    dry_run=args.dry_run,
+                    verbose=args.verbose,
+                    interval=args.interval,
+                )
+            )
         else:
-            result = asyncio.run(main_async(
-                user_ids=user_ids,
-                default_hours=args.default_hours,
-                post_limit=args.post_limit,
-                dry_run=args.dry_run,
-                verbose=args.verbose
-            ))
+            result = asyncio.run(
+                main_async(
+                    user_ids=user_ids,
+                    default_hours=args.default_hours,
+                    post_limit=args.post_limit,
+                    dry_run=args.dry_run,
+                    verbose=args.verbose,
+                )
+            )
 
             if result["total_users"] == 0:
                 print("✓ No active users to process")
             elif args.dry_run:
                 print("✓ Dry run complete")
             else:
-                print(f"✓ Created {result['total_summaries_created']} summaries for {result['total_users']} users")
+                print(
+                    f"✓ Created {result['total_summaries_created']} summaries for {result['total_users']} users"
+                )
 
         sys.exit(0)
 
@@ -381,6 +390,7 @@ def main():
     except Exception as e:
         print(f"✗ Failed: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

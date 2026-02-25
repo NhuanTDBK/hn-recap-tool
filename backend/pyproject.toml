@@ -127,6 +127,7 @@ ignore = [
     "E501",  # line too long (handled by black)
     "B008",  # do not perform function calls in argument defaults
     "C901",  # too complex
+    "UP017", # datetime.UTC only available in Python 3.11+; test runner is 3.10
 ]
 fixable = ["ALL"]
 unfixable = []

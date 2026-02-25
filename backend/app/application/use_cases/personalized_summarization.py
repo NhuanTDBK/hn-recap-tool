@@ -2,18 +2,18 @@
 
 This module implements personalized summarization that:
 1. Groups users by delivery_style to minimize API calls
-2. Uses incremental post ID ranges to process only new posts (EPIC-4)
+2. Uses a rolling collected_at window to find all newly collected posts (Story 8.1)
 3. Generates per-user summaries with user_id
 4. Leverages prompt caching for efficiency
 
-Note: As of EPIC-4, the pipeline uses post ID-based selection instead of
-timestamp-based selection to guarantee complete coverage without gaps.
+Note: As of Story 8.1, the pipeline uses collected_at-based selection instead of
+hn_id-based watermarking. This ensures late-arriving posts (posts that crossed the
+score threshold hours/days after creation) are never silently skipped.
 """
 
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Dict, List, Optional
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,11 +23,16 @@ from app.infrastructure.storage.rocksdb_store import RocksDBContentStore
 
 logger = logging.getLogger(__name__)
 
+# Lookback window for unsummarized post discovery (Story 8.1).
+# Posts collected within this many hours are candidates for summarization,
+# regardless of their hn_id. Configurable via the --default-hours CLI flag.
+SUMMARIZER_LOOKBACK_HOURS = 48
+
 
 # Deprecated: Old delivery_style mapping (kept for backward compatibility)
 STYLE_TO_PROMPT_TYPE = {
-    "flat_scroll": "basic",      # Detailed summaries for comprehensive view
-    "brief": "concise",           # Ultra-brief summaries for quick scanning
+    "flat_scroll": "basic",  # Detailed summaries for comprehensive view
+    "brief": "concise",  # Ultra-brief summaries for quick scanning
 }
 
 
@@ -53,9 +58,7 @@ def get_prompt_type_for_user(user: User) -> str:
 
 
 async def get_user_last_summary_time(
-    session: AsyncSession,
-    user_id: int,
-    default_hours: int = 6
+    session: AsyncSession, user_id: int, default_hours: int = 6
 ) -> datetime:
     """Get user's most recent summary timestamp.
 
@@ -67,9 +70,7 @@ async def get_user_last_summary_time(
     Returns:
         Latest summary created_at, or NOW - default_hours
     """
-    stmt = select(func.max(Summary.created_at)).where(
-        Summary.user_id == user_id
-    )
+    stmt = select(func.max(Summary.created_at)).where(Summary.user_id == user_id)
     result = await session.execute(stmt)
     last_time = result.scalar_one_or_none()
 
@@ -80,9 +81,7 @@ async def get_user_last_summary_time(
 
 
 async def get_group_time_window(
-    session: AsyncSession,
-    users: List[User],
-    default_hours: int = 6
+    session: AsyncSession, users: list[User], default_hours: int = 6
 ) -> datetime:
     """Get earliest last summary time across all users in group.
 
@@ -101,7 +100,9 @@ async def get_group_time_window(
         last_time = await get_user_last_summary_time(session, user.id, default_hours)
         times.append(last_time)
 
-    earliest = min(times) if times else datetime.now(timezone.utc) - timedelta(hours=default_hours)
+    earliest = (
+        min(times) if times else datetime.now(timezone.utc) - timedelta(hours=default_hours)
+    )
 
     logger.info(
         f"Group time window: {earliest.isoformat()} "
@@ -118,9 +119,8 @@ async def get_group_time_window(
 
 
 async def get_user_last_summary_post_id(
-    session: AsyncSession,
-    user_id: int
-) -> Optional[int]:
+    session: AsyncSession, user_id: int
+) -> int | None:
     """Get user's most recent summary post hn_id.
 
     This function replaces get_user_last_summary_time() for ID-based selection.
@@ -143,17 +143,14 @@ async def get_user_last_summary_post_id(
     result = await session.execute(stmt)
     last_hn_id = result.scalar_one_or_none()
 
-    logger.debug(
-        f"User {user_id}: last summary post hn_id = {last_hn_id}"
-    )
+    logger.debug(f"User {user_id}: last summary post hn_id = {last_hn_id}")
 
     return last_hn_id
 
 
 async def get_group_post_id_window(
-    session: AsyncSession,
-    users: List[User]
-) -> Optional[int]:
+    session: AsyncSession, users: list[User]
+) -> int | None:
     """Get minimum last summary post hn_id across all users in group.
 
     This ensures we fetch all posts that any user in the group needs.
@@ -193,11 +190,11 @@ async def get_group_post_id_window(
 
 async def find_posts_by_id_range(
     session: AsyncSession,
-    min_hn_id: Optional[int] = None,
-    limit: Optional[int] = None,
+    min_hn_id: int | None = None,
+    limit: int | None = None,
     fallback_to_latest: bool = True,
-    latest_post_limit: int = 10
-) -> List[Post]:
+    latest_post_limit: int = 10,
+) -> list[Post]:
     """Find posts with hn_id greater than min_hn_id.
 
     This replaces find_posts_in_time_window() for ID-based selection.
@@ -219,14 +216,18 @@ async def find_posts_by_id_range(
         # Note: We removed is_crawl_success filter to allow posts that haven't been
         # crawled yet to be summarized - the summarization pipeline can work with
         # title/metadata even if content extraction hasn't been completed
-        stmt = select(Post).where(
-            and_(
-                Post.hn_id > min_hn_id,
-                Post.type == "story",
-                Post.is_dead.is_(False),
-                Post.is_deleted.is_(False),
+        stmt = (
+            select(Post)
+            .where(
+                and_(
+                    Post.hn_id > min_hn_id,
+                    Post.type == "story",
+                    Post.is_dead.is_(False),
+                    Post.is_deleted.is_(False),
+                )
             )
-        ).order_by(Post.score.desc())
+            .order_by(Post.score.desc())
+        )
 
         if limit:
             stmt = stmt.limit(limit)
@@ -246,13 +247,18 @@ async def find_posts_by_id_range(
             f"No min_hn_id provided, falling back to latest {latest_post_limit} posts by hn_id"
         )
 
-        stmt = select(Post).where(
-            and_(
-                Post.type == "story",
-                Post.is_dead.is_(False),
-                Post.is_deleted.is_(False),
+        stmt = (
+            select(Post)
+            .where(
+                and_(
+                    Post.type == "story",
+                    Post.is_dead.is_(False),
+                    Post.is_deleted.is_(False),
+                )
             )
-        ).order_by(Post.hn_id.desc()).limit(latest_post_limit)
+            .order_by(Post.hn_id.desc())
+            .limit(latest_post_limit)
+        )
 
         result = await session.execute(stmt)
         posts = list(result.scalars().all())
@@ -264,19 +270,72 @@ async def find_posts_by_id_range(
         return []
 
 
+async def find_unsummarized_posts(
+    session: AsyncSession,
+    lookback_hours: int = SUMMARIZER_LOOKBACK_HOURS,
+    limit: int | None = None,
+) -> list[Post]:
+    """Find posts collected within the lookback window.
+
+    Replaces find_posts_by_id_range + get_group_post_id_window (Story 8.1).
+    Uses collected_at instead of hn_id so that late-arriving posts — posts
+    that crossed the score threshold hours/days after creation — are never
+    silently skipped.
+
+    Per-user deduplication is handled downstream by filter_posts_for_user
+    and summarize_for_users_in_group (the existing idempotency layer).
+
+    Args:
+        session: Database session
+        lookback_hours: Number of hours to scan back from now
+        limit: Maximum number of posts to return
+
+    Returns:
+        Posts ordered by score descending
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+
+    logger.info(
+        f"Scanning posts collected since {since.isoformat()} ({lookback_hours}h window)"
+    )
+
+    stmt = (
+        select(Post)
+        .where(
+            and_(
+                Post.type == "story",
+                Post.is_dead.is_(False),
+                Post.is_deleted.is_(False),
+                Post.collected_at >= since,
+            )
+        )
+        .order_by(Post.score.desc())
+    )
+
+    if limit:
+        stmt = stmt.limit(limit)
+
+    result = await session.execute(stmt)
+    posts = list(result.scalars().all())
+
+    logger.info(f"Found {len(posts)} posts in {lookback_hours}h window")
+
+    return posts
+
+
 # ============================================================================
-# OLD: Timestamp-based functions (kept for backward compatibility)
-# Will be removed after validation of ID-based approach
+# DEPRECATED: hn_id watermark functions (Story 8.1 — replaced by collected_at window)
+# Kept for reference; will be removed in a future cleanup sprint.
 # ============================================================================
 
 
 async def find_posts_in_time_window(
     session: AsyncSession,
     since: datetime,
-    limit: Optional[int] = None,
+    limit: int | None = None,
     fallback_to_latest: bool = True,
-    latest_post_limit: int = 10
-) -> List[Post]:
+    latest_post_limit: int = 10,
+) -> list[Post]:
     """Find posts created after the given time.
 
     Args:
@@ -289,14 +348,18 @@ async def find_posts_in_time_window(
     Returns:
         List of posts
     """
-    stmt = select(Post).where(
-        and_(
-            Post.created_at >= since,
-            Post.type == "story",
-            Post.is_dead.is_(False),
-            Post.is_deleted.is_(False),
+    stmt = (
+        select(Post)
+        .where(
+            and_(
+                Post.created_at >= since,
+                Post.type == "story",
+                Post.is_dead.is_(False),
+                Post.is_deleted.is_(False),
+            )
         )
-    ).order_by(Post.score.desc())
+        .order_by(Post.score.desc())
+    )
 
     if limit:
         stmt = stmt.limit(limit)
@@ -311,13 +374,18 @@ async def find_posts_in_time_window(
         )
 
         # Get latest posts regardless of time
-        stmt = select(Post).where(
-            and_(
-                Post.type == "story",
-                Post.is_dead.is_(False),
-                Post.is_deleted.is_(False),
+        stmt = (
+            select(Post)
+            .where(
+                and_(
+                    Post.type == "story",
+                    Post.is_dead.is_(False),
+                    Post.is_deleted.is_(False),
+                )
             )
-        ).order_by(Post.created_at.desc()).limit(latest_post_limit)
+            .order_by(Post.created_at.desc())
+            .limit(latest_post_limit)
+        )
 
         result = await session.execute(stmt)
         posts = list(result.scalars().all())
@@ -325,19 +393,15 @@ async def find_posts_in_time_window(
         logger.info(f"Found {len(posts)} latest posts (fallback mode)")
     else:
         logger.info(
-            f"Found {len(posts)} posts in time window "
-            f"(since {since.isoformat()})"
+            f"Found {len(posts)} posts in time window (since {since.isoformat()})"
         )
 
     return posts
 
 
 async def filter_posts_for_user(
-    session: AsyncSession,
-    user: User,
-    posts: List[Post],
-    prompt_type: str
-) -> List[Post]:
+    session: AsyncSession, user: User, posts: list[Post], prompt_type: str
+) -> list[Post]:
     """Filter posts that user doesn't already have summaries for.
 
     Args:
@@ -349,6 +413,10 @@ async def filter_posts_for_user(
     Returns:
         Posts without summaries for this user/prompt_type
     """
+    # Idempotency layer (Story 8.1): even though find_unsummarized_posts uses
+    # a rolling window, a post may have been summarized in a previous cycle
+    # that still falls within the window. This check ensures we never call the
+    # LLM API for a post the user already has a summary for.
     if not posts:
         return []
 
@@ -359,7 +427,7 @@ async def filter_posts_for_user(
         and_(
             Summary.user_id == user.id,
             Summary.post_id.in_(post_ids),
-            Summary.prompt_type == prompt_type
+            Summary.prompt_type == prompt_type,
         )
     )
 
@@ -370,17 +438,13 @@ async def filter_posts_for_user(
     filtered = [p for p in posts if p.id not in existing_post_ids]
 
     logger.debug(
-        f"User {user.id}: {len(filtered)} new posts "
-        f"(filtered from {len(posts)})"
+        f"User {user.id}: {len(filtered)} new posts (filtered from {len(posts)})"
     )
 
     return filtered
 
 
-async def get_post_content(
-    post: Post,
-    content_store: RocksDBContentStore
-) -> str:
+async def get_post_content(post: Post, content_store: RocksDBContentStore) -> str:
     """Get post content from RocksDB or construct from metadata.
 
     Args:
@@ -428,9 +492,8 @@ async def get_post_content(
 
 
 async def group_users_by_delivery_style(
-    session: AsyncSession,
-    user_ids: Optional[List[int]] = None
-) -> Dict[str, List[User]]:
+    session: AsyncSession, user_ids: list[int] | None = None
+) -> dict[str, list[User]]:
     """Group users by their summary_preferences.style.
 
     Note: Function name kept for backward compatibility but now groups by
@@ -452,7 +515,7 @@ async def group_users_by_delivery_style(
     users = list(result.scalars().all())
 
     # Group by prompt_type (from summary_preferences.style)
-    groups: Dict[str, List[User]] = {}
+    groups: dict[str, list[User]] = {}
     for user in users:
         prompt_type = get_prompt_type_for_user(user)
         if prompt_type not in groups:
@@ -474,13 +537,13 @@ async def group_users_by_delivery_style(
 async def summarize_for_users_in_group(
     session: AsyncSession,
     content_store: RocksDBContentStore,
-    users: List[User],
-    posts: List[Post],
+    users: list[User],
+    posts: list[Post],
     prompt_type: str,
     openai_client,
     agent_instructions: str,
-    model: str = "gpt-4o-mini"
-) -> Dict:
+    model: str = "gpt-4o-mini",
+) -> dict:
     """Generate summaries for all users in a group.
 
     This is the core of the grouped summarization approach. We:
@@ -526,18 +589,22 @@ async def summarize_for_users_in_group(
                 and_(
                     Summary.user_id.in_(user_ids),
                     Summary.post_id == post_id,
-                    Summary.prompt_type == prompt_type
+                    Summary.prompt_type == prompt_type,
                 )
             )
             result = await session.execute(stmt)
             users_with_summary = set(result.scalars().all())
 
             # Identify which users need the summary
-            users_needing_summary = [uid for uid in user_ids if uid not in users_with_summary]
+            users_needing_summary = [
+                uid for uid in user_ids if uid not in users_with_summary
+            ]
 
             # If all users already have this summary, skip the API call
             if not users_needing_summary:
-                logger.debug(f"Post {post.id}: All {len(users)} users already have summary, skipping")
+                logger.debug(
+                    f"Post {post.id}: All {len(users)} users already have summary, skipping"
+                )
                 continue
 
             # Get content
@@ -555,9 +622,9 @@ async def summarize_for_users_in_group(
                     {
                         "role": "system",
                         "content": agent_instructions,
-                        "cache_control": {"type": "ephemeral"}
+                        "cache_control": {"type": "ephemeral"},
                     },
-                    {"role": "user", "content": content}
+                    {"role": "user", "content": content},
                 ],
                 "max_completion_tokens": 500,
             }
@@ -579,19 +646,23 @@ async def summarize_for_users_in_group(
 
                 # Check for cached tokens
                 cached_tokens = 0
-                if hasattr(response.usage, 'prompt_tokens_details'):
+                if hasattr(response.usage, "prompt_tokens_details"):
                     details = response.usage.prompt_tokens_details
-                    if hasattr(details, 'cached_tokens') and details.cached_tokens:
+                    if hasattr(details, "cached_tokens") and details.cached_tokens:
                         cached_tokens = details.cached_tokens
 
                 # Calculate cost with caching discount
                 uncached_prompt_tokens = prompt_tokens - cached_tokens
-                input_cost = (uncached_prompt_tokens * 0.15 / 1_000_000) + (cached_tokens * 0.015 / 1_000_000)
+                input_cost = (uncached_prompt_tokens * 0.15 / 1_000_000) + (
+                    cached_tokens * 0.015 / 1_000_000
+                )
                 output_cost = completion_tokens * 0.60 / 1_000_000
                 cost_per_summary = Decimal(str(input_cost + output_cost))
 
                 if cached_tokens > 0:
-                    logger.debug(f"Cache hit: {cached_tokens} tokens (saved ~${(cached_tokens * 0.135 / 1_000_000):.6f})")
+                    logger.debug(
+                        f"Cache hit: {cached_tokens} tokens (saved ~${(cached_tokens * 0.135 / 1_000_000):.6f})"
+                    )
             else:
                 actual_tokens = len(content) // 4 + len(summary_text) // 4
                 cost_per_summary = Decimal(str(actual_tokens * 0.00000015))
@@ -638,22 +709,22 @@ async def run_personalized_summarization(
     session: AsyncSession,
     content_store: RocksDBContentStore,
     openai_client,
-    user_ids: Optional[List[int]] = None,
-    default_hours: int = 6,
-    post_limit: Optional[int] = None,
-    dry_run: bool = False
-) -> Dict:
+    user_ids: list[int] | None = None,
+    default_hours: int = SUMMARIZER_LOOKBACK_HOURS,
+    post_limit: int | None = None,
+    dry_run: bool = False,
+) -> dict:
     """Run personalized summarization pipeline with grouping by delivery_style.
 
-    Note: As of EPIC-4, this pipeline uses post ID-based selection instead of
-    timestamp-based selection for guaranteed sequential coverage.
+    Uses a rolling collected_at window (Story 8.1) to find candidate posts,
+    ensuring late-arriving posts are never skipped.
 
     Args:
         session: Database session
         content_store: RocksDB store
         openai_client: OpenAI client instance
         user_ids: Optional list of user IDs to process (None = all active users)
-        default_hours: Deprecated (kept for backward compatibility, not used)
+        default_hours: Lookback window in hours for post discovery (default: 48)
         post_limit: Maximum posts to process per group
         dry_run: If True, don't actually create summaries
 
@@ -663,9 +734,9 @@ async def run_personalized_summarization(
     from app.infrastructure.agents.summarization_agent import create_summarization_agent
     from app.infrastructure.config.settings import settings
 
-    logger.info("="*80)
+    logger.info("=" * 80)
     logger.info("PERSONALIZED SUMMARIZATION PIPELINE")
-    logger.info("="*80)
+    logger.info("=" * 80)
 
     overall_stats = {
         "total_users": 0,
@@ -691,27 +762,17 @@ async def run_personalized_summarization(
     for prompt_type, users in groups.items():
         # Note: groups are now keyed by prompt_type directly from summary_preferences
 
-        logger.info(f"\n{'='*80}")
+        logger.info(f"\n{'=' * 80}")
         logger.info(f"Processing group: {prompt_type} ({len(users)} users)")
-        logger.info(f"{'='*80}")
+        logger.info(f"{'=' * 80}")
 
         # Create agent for this group (with caching)
         agent = create_summarization_agent(
-            prompt_type=prompt_type,
-            use_structured_output=False
+            prompt_type=prompt_type, use_structured_output=False
         )
 
-        # Get group post ID window (NEW: ID-based selection using hn_id)
-        min_hn_id = await get_group_post_id_window(session, users)
-
-        # Find posts by ID range (NEW: ID-based selection using hn_id)
-        posts = await find_posts_by_id_range(
-            session,
-            min_hn_id,
-            post_limit,
-            fallback_to_latest=True,
-            latest_post_limit=10
-        )
+        # Find posts in rolling collected_at window (Story 8.1)
+        posts = await find_unsummarized_posts(session, default_hours, post_limit)
 
         if not posts:
             logger.info(f"No posts found for group {prompt_type}")
@@ -723,7 +784,9 @@ async def run_personalized_summarization(
             continue
 
         if dry_run:
-            logger.info(f"DRY RUN: Would process {len(posts)} posts for {len(users)} users")
+            logger.info(
+                f"DRY RUN: Would process {len(posts)} posts for {len(users)} users"
+            )
             overall_stats["groups"][prompt_type] = {
                 "users": len(users),
                 "posts": len(posts),
@@ -740,7 +803,7 @@ async def run_personalized_summarization(
             prompt_type,
             openai_client,
             agent.instructions,
-            settings.openai_model
+            settings.openai_model,
         )
 
         # Update overall stats
@@ -766,9 +829,9 @@ async def run_personalized_summarization(
         )
 
     # Step 3: Print summary
-    logger.info(f"\n{'='*80}")
+    logger.info(f"\n{'=' * 80}")
     logger.info("RESULTS")
-    logger.info(f"{'='*80}")
+    logger.info(f"{'=' * 80}")
     logger.info(f"Total users: {overall_stats['total_users']}")
     logger.info(f"Total groups: {overall_stats['total_groups']}")
     logger.info(f"Posts processed: {overall_stats['total_posts_processed']}")
@@ -779,17 +842,21 @@ async def run_personalized_summarization(
         logger.info(f"Total tokens: {overall_stats['total_tokens']}")
         logger.info(f"Total cost: ${float(overall_stats['total_cost']):.4f}")
 
-        if overall_stats['total_api_calls'] > 0:
-            avg_tokens = overall_stats['total_tokens'] / overall_stats['total_api_calls']
+        if overall_stats["total_api_calls"] > 0:
+            avg_tokens = (
+                overall_stats["total_tokens"] / overall_stats["total_api_calls"]
+            )
             logger.info(f"Avg tokens per API call: {avg_tokens:.0f}")
 
         # Calculate efficiency gain
-        naive_api_calls = overall_stats['total_summaries_created']
-        actual_api_calls = overall_stats['total_api_calls']
+        naive_api_calls = overall_stats["total_summaries_created"]
+        actual_api_calls = overall_stats["total_api_calls"]
         if naive_api_calls > 0:
             reduction_pct = (1 - actual_api_calls / naive_api_calls) * 100
-            logger.info(f"Efficiency: {reduction_pct:.1f}% fewer API calls vs naive approach")
+            logger.info(
+                f"Efficiency: {reduction_pct:.1f}% fewer API calls vs naive approach"
+            )
 
-    logger.info(f"{'='*80}\n")
+    logger.info(f"{'=' * 80}\n")
 
     return overall_stats
