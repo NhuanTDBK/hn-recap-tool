@@ -45,7 +45,7 @@ services:
       timeout: ${REDIS_HEALTHCHECK_TIMEOUT:-5s}
       retries: ${REDIS_HEALTHCHECK_RETRIES:-5}
 
-  # --- Background workers ---
+  # --- Background workers (pipeline order: trigger → crawler → summarizer → delivery) ---
 
   trigger_posts_collection:
     build:
@@ -71,28 +71,25 @@ services:
     restart: ${RESTART_POLICY:-unless-stopped}
     mem_limit: ${TRIGGER_POSTS_MEM_LIMIT:-256m}
 
-  bot:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-      target: production
-    image: ${WORKER_IMAGE_NAME:-hnpal-app}  # reuse built image
-    container_name: ${BOT_CONTAINER_NAME:-hnpal-bot}
-    command: ["python", "${BOT_COMMAND_PATH:-scripts/run_bot.py}"]
+  crawler:
+    image: ${WORKER_IMAGE_NAME:-hnpal-app}
+    container_name: ${CRAWLER_CONTAINER_NAME:-hnpal-crawler}
+    command: ["python", "${CRAWLER_COMMAND_PATH:-scripts/crawl_and_store.py}", "--daemon", "--interval", "${CRAWLER_INTERVAL_SECONDS:-3600}"]
     environment:
       - DATA_DIR=${APP_DATA_DIR:-/app/data}
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hn_pal}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-hn_pal}
-      - REDIS_URL=redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}
+      - PYTHONPATH=/app
     env_file: .env
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      trigger_posts_collection:
+        condition: service_started
     volumes:
       - rocksdb_data:${APP_DATA_DIR:-/app/data}
     restart: ${RESTART_POLICY:-unless-stopped}
-    mem_limit: ${BOT_MEM_LIMIT:-256m}
+    mem_limit: ${CRAWLER_MEM_LIMIT:-256m}
 
   summarizer:
     build:
@@ -112,6 +109,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      crawler:
+        condition: service_started
     volumes:
       - rocksdb_data:${APP_DATA_DIR:-/app/data}
     restart: ${RESTART_POLICY:-unless-stopped}
@@ -135,10 +134,37 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      summarizer:
+        condition: service_started
     volumes:
       - rocksdb_data:${APP_DATA_DIR:-/app/data}
     restart: ${RESTART_POLICY:-unless-stopped}
     mem_limit: ${DELIVERY_MEM_LIMIT:-256m}
+
+  # --- Supporting services ---
+
+  bot:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    image: ${WORKER_IMAGE_NAME:-hnpal-app}  # reuse built image
+    container_name: ${BOT_CONTAINER_NAME:-hnpal-bot}
+    command: ["python", "${BOT_COMMAND_PATH:-scripts/run_bot.py}"]
+    environment:
+      - DATA_DIR=${APP_DATA_DIR:-/app/data}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hn_pal}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-hn_pal}
+      - REDIS_URL=redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - rocksdb_data:${APP_DATA_DIR:-/app/data}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    mem_limit: ${BOT_MEM_LIMIT:-256m}
 
 volumes:
   postgres_data:

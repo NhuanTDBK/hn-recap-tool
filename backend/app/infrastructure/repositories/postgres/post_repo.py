@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List, Optional, Set
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.interfaces import PostRepository
@@ -155,6 +155,35 @@ class PostgresPostRepository(PostRepository):
             .where(PostModel.collected_at >= start_date)
             .where(PostModel.collected_at <= end_date)
             .order_by(PostModel.score.desc())
+        )
+
+        result = await self.session.execute(stmt)
+        post_models = result.scalars().all()
+
+        return [self._to_domain(model) for model in post_models]
+
+    async def fetch_uncrawled_posts(self, limit: int = 200) -> List[DomainPost]:
+        """Fetch posts that need crawling (never crawled or failed with retries remaining).
+
+        Args:
+            limit: Maximum number of posts to return
+
+        Returns:
+            List of Post entities needing crawl
+        """
+        stmt = (
+            select(PostModel)
+            .where(
+                or_(
+                    PostModel.is_crawl_success.is_(None),
+                    and_(
+                        PostModel.is_crawl_success == False,  # noqa: E712
+                        PostModel.crawl_retry_count < 3,
+                    ),
+                )
+            )
+            .order_by(PostModel.collected_at.desc())
+            .limit(limit)
         )
 
         result = await self.session.execute(stmt)

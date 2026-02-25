@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 async def main_async(
     user_id: int = None,
-    max_posts: int = 10,
+    max_posts: int = 50,
     dry_run: bool = False,
 ):
     """Main async function for single delivery run.
@@ -359,8 +359,8 @@ def parse_args():
     parser.add_argument(
         "--max-posts",
         type=int,
-        default=10,
-        help="Maximum posts to deliver per user (default: 10)"
+        default=50,
+        help="Maximum posts to deliver per user (default: 50)"
     )
     parser.add_argument(
         "--dry-run",

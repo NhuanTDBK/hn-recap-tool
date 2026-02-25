@@ -12,11 +12,14 @@ Usage:
     python scripts/crawl_and_store.py
     python scripts/crawl_and_store.py --limit 50
     python scripts/crawl_and_store.py --score-threshold 200
+    python scripts/crawl_and_store.py --daemon
+    python scripts/crawl_and_store.py --daemon --interval 3600
 """
 
 import asyncio
 import argparse
 import logging
+import signal
 import sys
 from pathlib import Path
 
@@ -64,7 +67,7 @@ class HNCrawler:
             respect_robots_txt=True
         )
 
-        # Initialize RocksDB content store
+        # Initialize RocksDB content store (write mode — crawler is the single writer)
         self.content_store = RocksDBContentStore(db_path=rocksdb_path)
         self.rocksdb_path = rocksdb_path
 
@@ -159,6 +162,22 @@ class HNCrawler:
 
         logger.info(f"Successfully saved {len(saved_posts)} posts to database")
         return saved_posts
+
+    async def fetch_uncrawled_posts_from_db(self) -> list:
+        """Fetch posts that need crawling from the database.
+
+        Returns posts where is_crawl_success IS NULL or (is_crawl_success = FALSE
+        and crawl_retry_count < 3).
+
+        Returns:
+            List of domain Post entities needing crawl
+        """
+        async with async_session_maker() as session:
+            repo = PostgresPostRepository(session)
+            posts = await repo.fetch_uncrawled_posts()
+
+        logger.info(f"Found {len(posts)} posts to crawl (uncrawled or failed with retries remaining)")
+        return posts
 
     async def crawl_post_content(self, post: DomainPost) -> dict:
         """Crawl content for a single post.
@@ -327,6 +346,60 @@ class HNCrawler:
         return stats
 
 
+async def run_once(args, crawler: HNCrawler) -> int:
+    """Run a single crawl cycle.
+
+    In daemon mode: query uncrawled posts from DB and crawl them.
+    In one-shot mode: fetch from HN, save to DB, then crawl uncrawled posts.
+
+    Args:
+        args: Parsed argparse namespace
+        crawler: Initialized HNCrawler instance
+
+    Returns:
+        0 on success, 1 on failure
+    """
+    try:
+        if not args.daemon:
+            # One-shot mode: also fetch fresh posts from HN and save to DB
+            # (daemon mode skips this — trigger_posts_collection handles it)
+            logger.info("[1/3] Fetching posts from HackerNews...")
+            stories = await crawler.fetch_top_posts(
+                limit=args.limit,
+                score_threshold=args.score_threshold
+            )
+
+            if stories:
+                logger.info("[2/3] Saving new posts to PostgreSQL database...")
+                await crawler.save_posts_to_db(stories)
+            else:
+                logger.info("[2/3] No posts fetched, skipping DB save")
+
+            logger.info("[3/3] Crawling uncrawled post content...")
+        else:
+            logger.info("Crawling uncrawled post content...")
+
+        uncrawled_posts = await crawler.fetch_uncrawled_posts_from_db()
+
+        if not uncrawled_posts:
+            logger.info("No posts to crawl — all up to date")
+            return 0
+
+        stats = await crawler.crawl_all_posts(uncrawled_posts)
+
+        logger.info(
+            f"Crawl run complete: {stats['successful']} succeeded, "
+            f"{stats['failed']} failed, {stats['skipped']} skipped "
+            f"(HTML={stats['with_html']}, text={stats['with_text']}, "
+            f"markdown={stats['with_markdown']})"
+        )
+        return 0
+
+    except Exception as e:
+        logger.error(f"Crawl run failed: {e}", exc_info=True)
+        return 1
+
+
 async def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -356,6 +429,17 @@ async def main():
         default=30,
         help="HTTP request timeout in seconds (default: 30)"
     )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run continuously in a loop (crawl → sleep → repeat)"
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=3600,
+        help="Seconds to sleep between daemon runs (default: 3600)"
+    )
 
     args = parser.parse_args()
 
@@ -367,95 +451,46 @@ async def main():
     print(f"  - Score threshold: >= {args.score_threshold}")
     print(f"  - Max concurrent crawls: {args.max_concurrent}")
     print(f"  - Request timeout: {args.timeout}s")
+    if args.daemon:
+        print(f"  - Mode: daemon (interval={args.interval}s)")
     print("=" * 70)
 
+    crawler = HNCrawler(
+        max_concurrent=args.max_concurrent,
+        timeout=args.timeout
+    )
+
     try:
-        # Initialize crawler
-        crawler = HNCrawler(
-            max_concurrent=args.max_concurrent,
-            timeout=args.timeout
-        )
+        if args.daemon:
+            # Set up graceful shutdown on SIGTERM / SIGINT
+            shutdown_event = asyncio.Event()
+            loop = asyncio.get_event_loop()
 
-        # Step 1: Fetch posts
-        print("\n[1/3] Fetching posts from HackerNews...")
-        stories = await crawler.fetch_top_posts(
-            limit=args.limit,
-            score_threshold=args.score_threshold
-        )
+            def _handle_shutdown():
+                logger.info("Received shutdown signal — finishing current run then exiting...")
+                shutdown_event.set()
 
-        if not stories:
-            print("✗ No posts found matching criteria")
-            return 1
+            loop.add_signal_handler(signal.SIGTERM, _handle_shutdown)
+            loop.add_signal_handler(signal.SIGINT, _handle_shutdown)
 
-        print(f"✓ Fetched {len(stories)} posts")
+            logger.info("Crawler daemon started")
+            while not shutdown_event.is_set():
+                await run_once(args, crawler)
+                if shutdown_event.is_set():
+                    break
+                logger.info(f"Crawler sleeping {args.interval}s until next run...")
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=args.interval)
+                except asyncio.TimeoutError:
+                    pass  # Normal — interval elapsed, time for next run
+            logger.info("Crawler daemon shut down cleanly")
+            return 0
+        else:
+            return await run_once(args, crawler)
 
-        # Step 2: Save to database
-        print("\n[2/3] Saving posts to PostgreSQL database...")
-        saved_posts = await crawler.save_posts_to_db(stories)
-        print(f"✓ Saved {len(saved_posts)} posts to database")
-
-        # Step 3: Crawl content
-        print("\n[3/3] Crawling content from URLs...")
-        stats = await crawler.crawl_all_posts(saved_posts)
-
-        # Display results
-        print("\n" + "=" * 70)
-        print("📊 CRAWL SUMMARY")
-        print("=" * 70)
-        print(f"Total posts:        {stats['total']}")
-        print(f"Successful:         {stats['successful']} ✓")
-        print(f"Failed:             {stats['failed']} ✗")
-        print(f"Skipped (no URL):   {stats['skipped']} ⊘")
-        print(f"\nContent saved:")
-        print(f"  HTML files:       {stats['with_html']}")
-        print(f"  Text files:       {stats['with_text']}")
-        print(f"  Markdown files:   {stats['with_markdown']}")
-        print("=" * 70)
-
-        # Verify database
-        print("\n📦 Database Status:")
-        async with async_session_maker() as session:
-            repo = PostgresPostRepository(session)
-            # Count posts (we'll use a simple query)
-            from sqlalchemy import select, func
-            from app.infrastructure.database.models import Post as PostModel
-
-            stmt = select(func.count()).select_from(PostModel)
-            result = await session.execute(stmt)
-            total_posts = result.scalar()
-
-            stmt = select(func.count()).select_from(PostModel).where(
-                PostModel.is_crawl_success == True
-            )
-            result = await session.execute(stmt)
-            crawled_posts = result.scalar()
-
-            print(f"  Total posts in DB:     {total_posts}")
-            print(f"  Successfully crawled:  {crawled_posts}")
-
-        print("\n✅ Pipeline completed successfully!")
-
-        # Show RocksDB stats
-        print(f"\n💾 Content Storage (RocksDB):")
-        print(f"   - Database: {crawler.rocksdb_path}")
-        rocksdb_stats = crawler.content_store.get_stats()
-        print(f"   - HTML entries:     {rocksdb_stats['html_count']}")
-        print(f"   - Text entries:     {rocksdb_stats['text_count']}")
-        print(f"   - Markdown entries: {rocksdb_stats['markdown_count']}")
-        print(f"   - Total keys:       {rocksdb_stats['total_keys']}")
-
-        return 0
-
-    except Exception as e:
-        logger.error(f"Pipeline failed: {e}", exc_info=True)
-        return 1
     finally:
-        # Close database connections
         await engine.dispose()
-
-        # Close RocksDB
-        if 'crawler' in locals():
-            crawler.content_store.close()
+        crawler.content_store.close()
 
 
 if __name__ == "__main__":
