@@ -46,7 +46,6 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from openai import OpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -108,14 +107,11 @@ async def main_async(
                 db_path=str(Path(settings.data_dir) / "content.rocksdb"), read_only=True
             )
 
-            # Initialize OpenAI client
-            openai_client = OpenAI(api_key=settings.openai_api_key)
-
             # Run personalized summarization
+            # SDK reads OPENAI_API_KEY from environment directly — no client needed
             stats = await run_personalized_summarization(
                 session=session,
                 content_store=content_store,
-                openai_client=openai_client,
                 user_ids=user_ids,
                 default_hours=default_hours,
                 post_limit=post_limit,
@@ -331,11 +327,6 @@ def main():
             print(f"✗ Error: Invalid user IDs format: {args.user_ids}")
             print("  Expected format: --user-ids 1,2,3")
             sys.exit(1)
-
-    # Check for API key
-    if not settings.openai_api_key and not args.dry_run:
-        print("✗ Error: OPENAI_API_KEY not set in .env")
-        sys.exit(1)
 
     # Log startup info
     logger.info("=" * 80)

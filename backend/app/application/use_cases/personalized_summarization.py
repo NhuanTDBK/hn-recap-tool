@@ -15,9 +15,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from agents import Runner
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.infrastructure.agents.base_agent import BaseAgent
 from app.infrastructure.database.models import Post, Summary, User
 from app.infrastructure.storage.rocksdb_store import RocksDBContentStore
 
@@ -101,7 +103,9 @@ async def get_group_time_window(
         times.append(last_time)
 
     earliest = (
-        min(times) if times else datetime.now(timezone.utc) - timedelta(hours=default_hours)
+        min(times)
+        if times
+        else datetime.now(timezone.utc) - timedelta(hours=default_hours)
     )
 
     logger.info(
@@ -540,14 +544,12 @@ async def summarize_for_users_in_group(
     users: list[User],
     posts: list[Post],
     prompt_type: str,
-    openai_client,
-    agent_instructions: str,
-    model: str = "gpt-4o-mini",
+    base_agent: BaseAgent,
 ) -> dict:
-    """Generate summaries for all users in a group.
+    """Generate summaries for all users in a group via the OpenAI Agents SDK.
 
     This is the core of the grouped summarization approach. We:
-    1. Summarize each post once (with caching benefits)
+    1. Summarize each post once via Runner.run() (Story 8.3: uses Agent SDK, not raw HTTP)
     2. Distribute the summary to all users in the group
     3. Only store summaries for posts each user needs
 
@@ -557,13 +559,13 @@ async def summarize_for_users_in_group(
         users: Users in this group
         posts: Posts to summarize
         prompt_type: Prompt type for this group
-        openai_client: OpenAI client instance
-        agent_instructions: Cached agent instructions
-        model: OpenAI model to use
+        base_agent: BaseAgent instance (carries agent, model, instructions)
 
     Returns:
         Statistics dict
     """
+    from app.infrastructure.agents.config import settings as agent_settings
+
     stats = {
         "total_posts": len(posts),
         "total_users": len(users),
@@ -576,6 +578,20 @@ async def summarize_for_users_in_group(
         "api_calls": 0,
     }
 
+    # Optional Langfuse for group-level tracing (no user_id — one call serves all users)
+    langfuse = None
+    if agent_settings.langfuse_enabled and agent_settings.langfuse_public_key:
+        try:
+            from langfuse import Langfuse
+
+            langfuse = Langfuse(
+                public_key=agent_settings.langfuse_public_key,
+                secret_key=agent_settings.langfuse_secret_key,
+                host=agent_settings.langfuse_host,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize Langfuse: {e}")
+
     # Use plain IDs to avoid accessing expired ORM objects after rollback.
     user_ids = [u.id for u in users]
 
@@ -584,7 +600,6 @@ async def summarize_for_users_in_group(
         try:
             # First, check if ANY user in the group needs this post's summary
             # This avoids expensive API calls for posts all users already have
-            # Find which users already have summaries for this post
             stmt = select(Summary.user_id).where(
                 and_(
                     Summary.user_id.in_(user_ids),
@@ -615,61 +630,48 @@ async def summarize_for_users_in_group(
                 stats["skipped"] += 1
                 continue
 
-            # Call OpenAI API once for this post (with prompt caching)
-            request_kwargs = {
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": agent_instructions,
-                        "cache_control": {"type": "ephemeral"},
-                    },
-                    {"role": "user", "content": content},
-                ],
-                "max_completion_tokens": 500,
-            }
-            # GPT-5 models currently only support the default temperature.
-            if not model.startswith("gpt-5"):
-                request_kwargs["temperature"] = 0.3
+            # Run agent via OpenAI Agents SDK — one call per post, shared across group
+            trace = None
+            generation = None
+            if langfuse:
+                trace = langfuse.trace(
+                    name="summarize_group_post",
+                    metadata={"prompt_type": prompt_type, "post_id": str(post_id)},
+                )
+                generation = trace.generation(
+                    name="agent_execution",
+                    model=base_agent.model,
+                    input=content,
+                )
 
-            response = openai_client.chat.completions.create(**request_kwargs)
+            run_result = await Runner.run(base_agent.agent, input=content)
 
-            summary_text = response.choices[0].message.content.strip()
+            summary_text = str(run_result.final_output).strip()
             stats["api_calls"] += 1
             stats["posts_summarized"] += 1
 
-            # Calculate cost (accounting for caching)
-            if response.usage:
-                actual_tokens = response.usage.total_tokens
-                prompt_tokens = response.usage.prompt_tokens
-                completion_tokens = response.usage.completion_tokens
+            # Aggregate token usage across all model responses in this run
+            input_tokens = sum(r.usage.input_tokens for r in run_result.raw_responses)
+            output_tokens = sum(r.usage.output_tokens for r in run_result.raw_responses)
+            actual_tokens = input_tokens + output_tokens
 
-                # Check for cached tokens
-                cached_tokens = 0
-                if hasattr(response.usage, "prompt_tokens_details"):
-                    details = response.usage.prompt_tokens_details
-                    if hasattr(details, "cached_tokens") and details.cached_tokens:
-                        cached_tokens = details.cached_tokens
+            # Calculate cost (gpt-4o-mini rates)
+            input_cost = input_tokens * 0.15 / 1_000_000
+            output_cost = output_tokens * 0.60 / 1_000_000
+            cost_per_summary = Decimal(str(input_cost + output_cost))
 
-                # Calculate cost with caching discount
-                uncached_prompt_tokens = prompt_tokens - cached_tokens
-                input_cost = (uncached_prompt_tokens * 0.15 / 1_000_000) + (
-                    cached_tokens * 0.015 / 1_000_000
+            if generation:
+                generation.end(
+                    output=summary_text,
+                    usage={
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": actual_tokens,
+                    },
                 )
-                output_cost = completion_tokens * 0.60 / 1_000_000
-                cost_per_summary = Decimal(str(input_cost + output_cost))
-
-                if cached_tokens > 0:
-                    logger.debug(
-                        f"Cache hit: {cached_tokens} tokens (saved ~${(cached_tokens * 0.135 / 1_000_000):.6f})"
-                    )
-            else:
-                actual_tokens = len(content) // 4 + len(summary_text) // 4
-                cost_per_summary = Decimal(str(actual_tokens * 0.00000015))
 
             # Distribute summary to users in group who need it
             for user_id in users_needing_summary:
-                # Create summary record for this user
                 summary = Summary(
                     post_id=post_id,
                     user_id=user_id,  # Personalized to this user
@@ -708,7 +710,6 @@ async def summarize_for_users_in_group(
 async def run_personalized_summarization(
     session: AsyncSession,
     content_store: RocksDBContentStore,
-    openai_client,
     user_ids: list[int] | None = None,
     default_hours: int = SUMMARIZER_LOOKBACK_HOURS,
     post_limit: int | None = None,
@@ -718,11 +719,11 @@ async def run_personalized_summarization(
 
     Uses a rolling collected_at window (Story 8.1) to find candidate posts,
     ensuring late-arriving posts are never skipped.
+    Uses OpenAI Agents SDK Runner for all LLM calls (Story 8.3).
 
     Args:
         session: Database session
         content_store: RocksDB store
-        openai_client: OpenAI client instance
         user_ids: Optional list of user IDs to process (None = all active users)
         default_hours: Lookback window in hours for post discovery (default: 48)
         post_limit: Maximum posts to process per group
@@ -732,7 +733,6 @@ async def run_personalized_summarization(
         Statistics dict with processing results
     """
     from app.infrastructure.agents.summarization_agent import create_summarization_agent
-    from app.infrastructure.config.settings import settings
 
     logger.info("=" * 80)
     logger.info("PERSONALIZED SUMMARIZATION PIPELINE")
@@ -794,16 +794,14 @@ async def run_personalized_summarization(
             }
             continue
 
-        # Summarize posts for all users in group
+        # Summarize posts for all users in group via Agent SDK Runner (Story 8.3)
         group_stats = await summarize_for_users_in_group(
             session,
             content_store,
             users,
             posts,
             prompt_type,
-            openai_client,
-            agent.instructions,
-            settings.openai_model,
+            base_agent=agent,
         )
 
         # Update overall stats

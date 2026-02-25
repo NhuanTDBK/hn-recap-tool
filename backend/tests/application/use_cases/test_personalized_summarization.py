@@ -1,8 +1,8 @@
-"""Unit tests for personalized_summarization use case (Story 8.1: collected_at window)."""
+"""Unit tests for personalized_summarization use case (Story 8.1: collected_at window, Story 8.3: Agent Runner)."""
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,7 @@ from app.application.use_cases.personalized_summarization import (
     find_unsummarized_posts,
     get_group_post_id_window,
     get_user_last_summary_post_id,
+    summarize_for_users_in_group,
 )
 from app.infrastructure.database.models import Post, User
 
@@ -468,6 +469,200 @@ async def test_filter_posts_for_user_excludes_already_summarized(
 
     assert len(result) == 1
     assert result[0].id == new_post_id, "Only the unsummarized post should pass through"
+
+
+# ============================================================================
+# Fixtures: Story 8.3 (Agent Runner)
+# ============================================================================
+
+
+@pytest.fixture
+def mock_base_agent():
+    """Mock BaseAgent carrying an SDK Agent instance."""
+    mock = MagicMock()
+    mock.agent = MagicMock()  # agents.Agent SDK instance passed to Runner.run
+    mock.model = "gpt-4o-mini"
+    return mock
+
+
+def _make_sdk_run_result(
+    input_tokens: int = 100,
+    output_tokens: int = 50,
+    summary_text: str = "Test summary",
+):
+    """Build a minimal mock that looks like an openai-agents RunResult."""
+    usage = MagicMock()
+    usage.input_tokens = input_tokens
+    usage.output_tokens = output_tokens
+
+    raw_response = MagicMock()
+    raw_response.usage = usage
+
+    result = MagicMock()
+    result.final_output = summary_text
+    result.raw_responses = [raw_response]
+    return result
+
+
+# ============================================================================
+# Tests: summarize_for_users_in_group (Story 8.3 — Agent Runner)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_summarize_for_users_in_group_uses_runner(
+    mock_db_session, sample_user, mock_base_agent
+):
+    """Runner.run must be called, not openai_client.chat.completions.create."""
+    post = MagicMock(spec=Post)
+    post.id = uuid.uuid4()
+
+    # No existing summaries for any user
+    mock_scalars = MagicMock()
+    mock_scalars.all.return_value = []
+    mock_result = MagicMock()
+    mock_result.scalars.return_value = mock_scalars
+    mock_db_session.execute = AsyncMock(return_value=mock_result)
+    mock_db_session.commit = AsyncMock()
+
+    with (
+        patch(
+            "app.application.use_cases.personalized_summarization.Runner.run",
+            new_callable=AsyncMock,
+            return_value=_make_sdk_run_result(),
+        ) as mock_runner_run,
+        patch(
+            "app.application.use_cases.personalized_summarization.get_post_content",
+            new_callable=AsyncMock,
+            return_value="Some article content.",
+        ),
+        patch("app.infrastructure.agents.config.settings") as mock_settings,
+    ):
+        mock_settings.langfuse_enabled = False
+        mock_settings.langfuse_public_key = None
+
+        stats = await summarize_for_users_in_group(
+            session=mock_db_session,
+            content_store=MagicMock(),
+            users=[sample_user],
+            posts=[post],
+            prompt_type="basic",
+            base_agent=mock_base_agent,
+        )
+
+    mock_runner_run.assert_called_once()
+    assert stats["api_calls"] == 1
+    assert stats["posts_summarized"] == 1
+
+
+@pytest.mark.asyncio
+async def test_summarize_for_users_in_group_extracts_sdk_token_usage(
+    mock_db_session, sample_user, mock_base_agent
+):
+    """Token counts come from result.raw_responses[*].usage, not response.usage.prompt_tokens."""
+    post = MagicMock(spec=Post)
+    post.id = uuid.uuid4()
+
+    mock_scalars = MagicMock()
+    mock_scalars.all.return_value = []
+    mock_result = MagicMock()
+    mock_result.scalars.return_value = mock_scalars
+    mock_db_session.execute = AsyncMock(return_value=mock_result)
+    mock_db_session.commit = AsyncMock()
+
+    input_tokens, output_tokens = 200, 75
+
+    with (
+        patch(
+            "app.application.use_cases.personalized_summarization.Runner.run",
+            new_callable=AsyncMock,
+            return_value=_make_sdk_run_result(
+                input_tokens=input_tokens, output_tokens=output_tokens
+            ),
+        ),
+        patch(
+            "app.application.use_cases.personalized_summarization.get_post_content",
+            new_callable=AsyncMock,
+            return_value="Article text.",
+        ),
+        patch("app.infrastructure.agents.config.settings") as mock_settings,
+    ):
+        mock_settings.langfuse_enabled = False
+        mock_settings.langfuse_public_key = None
+
+        stats = await summarize_for_users_in_group(
+            session=mock_db_session,
+            content_store=MagicMock(),
+            users=[sample_user],
+            posts=[post],
+            prompt_type="basic",
+            base_agent=mock_base_agent,
+        )
+
+    assert stats["total_tokens"] == input_tokens + output_tokens
+
+
+@pytest.mark.asyncio
+async def test_summarize_for_users_in_group_creates_langfuse_trace(
+    mock_db_session, sample_user, mock_base_agent
+):
+    """A Langfuse trace must be created per post when langfuse_enabled=True."""
+    post = MagicMock(spec=Post)
+    post.id = uuid.uuid4()
+
+    mock_scalars = MagicMock()
+    mock_scalars.all.return_value = []
+    mock_result = MagicMock()
+    mock_result.scalars.return_value = mock_scalars
+    mock_db_session.execute = AsyncMock(return_value=mock_result)
+    mock_db_session.commit = AsyncMock()
+
+    mock_langfuse_instance = MagicMock()
+    mock_trace = MagicMock()
+    mock_generation = MagicMock()
+    mock_langfuse_instance.trace.return_value = mock_trace
+    mock_trace.generation.return_value = mock_generation
+
+    # langfuse may not be installed in the test environment; inject a mock module
+    mock_langfuse_class = MagicMock(return_value=mock_langfuse_instance)
+    mock_langfuse_module = MagicMock()
+    mock_langfuse_module.Langfuse = mock_langfuse_class
+
+    with (
+        patch(
+            "app.application.use_cases.personalized_summarization.Runner.run",
+            new_callable=AsyncMock,
+            return_value=_make_sdk_run_result(),
+        ),
+        patch(
+            "app.application.use_cases.personalized_summarization.get_post_content",
+            new_callable=AsyncMock,
+            return_value="Article content.",
+        ),
+        patch("app.infrastructure.agents.config.settings") as mock_settings,
+        patch.dict("sys.modules", {"langfuse": mock_langfuse_module}),
+    ):
+        mock_settings.langfuse_enabled = True
+        mock_settings.langfuse_public_key = "pk_test"
+        mock_settings.langfuse_secret_key = "sk_test"
+        mock_settings.langfuse_host = "https://cloud.langfuse.com"
+
+        await summarize_for_users_in_group(
+            session=mock_db_session,
+            content_store=MagicMock(),
+            users=[sample_user],
+            posts=[post],
+            prompt_type="basic",
+            base_agent=mock_base_agent,
+        )
+
+    # One trace per post with correct metadata
+    mock_langfuse_instance.trace.assert_called_once_with(
+        name="summarize_group_post",
+        metadata={"prompt_type": "basic", "post_id": str(post.id)},
+    )
+    mock_trace.generation.assert_called_once()
+    mock_generation.end.assert_called_once()
 
 
 if __name__ == "__main__":
