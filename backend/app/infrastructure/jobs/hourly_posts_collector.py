@@ -3,8 +3,7 @@
 This job:
 1. Fetches top stories from HackerNews API
 2. Stores posts in PostgreSQL database
-3. Caches post metadata in RocksDB for quick access
-4. Runs every hour to keep data fresh
+3. Runs every hour to keep data fresh
 
 Architecture:
 - Uses APScheduler for hourly cron scheduling
@@ -13,7 +12,6 @@ Architecture:
 - Error handling with retries
 """
 
-import json
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -21,18 +19,16 @@ from typing import List, Optional
 from app.domain.entities import Post
 from app.infrastructure.services.firebase_hn_client import FirebaseHNClient
 from app.infrastructure.repositories.postgres.post_repo import PostgresPostRepository
-from app.infrastructure.storage.rocksdb_store import RocksDBContentStore
 
 logger = logging.getLogger(__name__)
 
 
 class HourlyPostsCollectorJob:
-    """Collects top HackerNews posts hourly and stores in PostgreSQL + RocksDB."""
+    """Collects top HackerNews posts hourly and stores in PostgreSQL."""
 
     def __init__(
         self,
         post_repository: PostgresPostRepository,
-        rocksdb_store: RocksDBContentStore,
         hn_client: Optional[FirebaseHNClient] = None,
         score_threshold: int = 50,
         limit: int = 100,
@@ -41,20 +37,17 @@ class HourlyPostsCollectorJob:
 
         Args:
             post_repository: PostgreSQL repository for posts
-            rocksdb_store: RocksDB store for metadata caching
             hn_client: HackerNews Firebase client (default: new instance)
             score_threshold: Minimum score to collect posts
             limit: Maximum number of posts to collect per run
         """
         self.post_repository = post_repository
-        self.rocksdb_store = rocksdb_store
         self.hn_client = hn_client or FirebaseHNClient()
         self.score_threshold = score_threshold
         self.limit = limit
         self.stats = {
             "posts_fetched": 0,
             "posts_saved": 0,
-            "posts_cached": 0,
             "duplicates_skipped": 0,
             "errors": 0,
             "last_run": None,
@@ -74,7 +67,6 @@ class HourlyPostsCollectorJob:
         self.stats = {
             "posts_fetched": 0,
             "posts_saved": 0,
-            "posts_cached": 0,
             "duplicates_skipped": 0,
             "errors": 0,
             "last_run": datetime.utcnow().isoformat(),
@@ -132,20 +124,9 @@ class HourlyPostsCollectorJob:
                 self.stats["errors"] += 1
                 return self.stats
 
-            # Step 5: Cache post metadata in RocksDB
-            logger.info("Step 5: Caching post metadata in RocksDB")
-            for post in saved_posts:
-                try:
-                    await self._cache_post_metadata(post)
-                    self.stats["posts_cached"] += 1
-                except Exception as e:
-                    logger.warning(f"Failed to cache post {post.hn_id}: {e}")
-                    continue
-
             logger.info(
                 f"Hourly collection complete: "
                 f"{self.stats['posts_saved']} saved, "
-                f"{self.stats['posts_cached']} cached, "
                 f"{self.stats['duplicates_skipped']} duplicates skipped"
             )
 
@@ -204,33 +185,6 @@ class HourlyPostsCollectorJob:
             created_at=post_dict["created_at"],
             collected_at=datetime.utcnow(),
         )
-
-    async def _cache_post_metadata(self, post: Post) -> None:
-        """Cache post metadata in RocksDB for quick access.
-
-        Args:
-            post: Post entity to cache
-        """
-        metadata = {
-            "hn_id": int(post.hn_id),
-            "title": post.title,
-            "author": post.author,
-            "url": post.url,
-            "points": post.points,
-            "num_comments": post.num_comments,
-            "post_type": post.post_type,
-            "created_at": post.created_at.isoformat() if post.created_at else None,
-            "collected_at": datetime.utcnow().isoformat(),
-        }
-
-        # Store as JSON in RocksDB with special "metadata:" prefix
-        key = f"metadata:{int(post.hn_id)}".encode("utf-8")
-        value = json.dumps(metadata).encode("utf-8")
-
-        # RocksDB store expects async but rocksdict is sync
-        # We'll handle this by storing directly
-        self.rocksdb_store.db[key] = value
-        logger.debug(f"Cached metadata for post {post.hn_id}")
 
     def get_stats(self) -> dict:
         """Get collection statistics.

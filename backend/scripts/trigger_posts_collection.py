@@ -70,7 +70,6 @@ async def run_once(session: AsyncSession, score_threshold: int, posts_limit: int
     logger.info("COLLECTION RESULTS:")
     logger.info(f"  Posts fetched from HN:     {stats['posts_fetched']}")
     logger.info(f"  New posts saved:           {stats['posts_saved']}")
-    logger.info(f"  Posts cached in RocksDB:   {stats['posts_cached']}")
     logger.info(f"  Duplicates skipped:        {stats['duplicates_skipped']}")
     logger.info(f"  Errors encountered:        {stats['errors']}")
     logger.info(f"  Collection time:           {duration:.2f} seconds")

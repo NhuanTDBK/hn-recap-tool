@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from app.infrastructure.jobs.hourly_posts_collector import HourlyPostsCollectorJob
 from app.domain.entities import Post
@@ -20,24 +20,16 @@ class TestHourlyPostsCollector:
         return mock
 
     @pytest.fixture
-    def mock_rocksdb_store(self):
-        """Create mock RocksDB store."""
-        mock = MagicMock()
-        mock.db = {}
-        return mock
-
-    @pytest.fixture
     def mock_hn_client(self):
         """Create mock HN client."""
         mock = AsyncMock()
         return mock
 
     @pytest.fixture
-    def collector(self, mock_post_repository, mock_rocksdb_store, mock_hn_client):
+    def collector(self, mock_post_repository, mock_hn_client):
         """Create collector instance."""
         return HourlyPostsCollectorJob(
             post_repository=mock_post_repository,
-            rocksdb_store=mock_rocksdb_store,
             hn_client=mock_hn_client,
             score_threshold=50,
             limit=100,
@@ -90,27 +82,6 @@ class TestHourlyPostsCollector:
         assert post.author == "test_author"
         assert post.points == 100
         assert post.num_comments == 3
-
-    @pytest.mark.asyncio
-    async def test_cache_post_metadata(self, collector):
-        """Test caching post metadata in RocksDB."""
-        post = Post(
-            hn_id=12345,
-            title="Test Post",
-            author="author",
-            url="https://example.com",
-            points=100,
-            num_comments=5,
-            post_type="story",
-            created_at=datetime.utcnow(),
-            collected_at=datetime.utcnow(),
-        )
-
-        await collector._cache_post_metadata(post)
-
-        # Check metadata was stored
-        key = "metadata:12345".encode("utf-8")
-        assert key in collector.rocksdb_store.db
 
     @pytest.mark.asyncio
     async def test_collect_top_posts_success(
@@ -167,7 +138,6 @@ class TestHourlyPostsCollector:
         # Verify results
         assert stats["posts_fetched"] == 2
         assert stats["posts_saved"] == 2
-        assert stats["posts_cached"] == 2
         assert stats["duplicates_skipped"] == 0
         assert stats["errors"] == 0
         mock_post_repository.save_batch.assert_called_once()
@@ -259,11 +229,9 @@ class TestHourlyPostsCollector:
     def test_get_stats(self, collector):
         """Test getting collection statistics."""
         collector.stats["posts_saved"] = 5
-        collector.stats["posts_cached"] = 5
         stats = collector.get_stats()
 
         assert stats["posts_saved"] == 5
-        assert stats["posts_cached"] == 5
         assert "last_run" in stats
 
     @pytest.mark.asyncio
@@ -277,7 +245,6 @@ class TestHourlyPostsCollector:
 
         assert "posts_fetched" in stats
         assert "posts_saved" in stats
-        assert "posts_cached" in stats
 
 
 if __name__ == "__main__":
