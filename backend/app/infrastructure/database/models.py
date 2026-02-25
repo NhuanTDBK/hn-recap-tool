@@ -101,6 +101,7 @@ class User(Base):
     agent_calls = relationship("AgentCall", back_populates="user", cascade="all, delete-orphan")
     deliveries = relationship("Delivery", back_populates="user", cascade="all, delete-orphan")
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
+    activity_log = relationship("UserActivityLog", cascade="all, delete-orphan")
 
     def get_summary_style(self) -> str:
         """Get the user's preferred summary style."""
@@ -295,3 +296,29 @@ class Conversation(Base):
     def __repr__(self):
         status = "active" if self.ended_at is None else "ended"
         return f"<Conversation(user_id={self.user_id}, post_id={self.post_id}, status={status})>"
+
+
+class UserActivityLog(Base):
+    """Append-only log of user interactions: rating summaries and saving posts."""
+
+    __tablename__ = "user_activity_log"
+
+    # Primary key
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+
+    # Foreign keys
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    post_id = Column(UUID(as_uuid=True), ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Activity details
+    action_type = Column(String(20), nullable=False, index=True)  # "rate_up", "rate_down", "save"
+
+    # Timestamp
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+    # Relationships
+    user = relationship("User")
+    post = relationship("Post")
+
+    def __repr__(self):
+        return f"<UserActivityLog(user_id={self.user_id}, post_id={self.post_id}, action={self.action_type}, at={self.created_at})>"

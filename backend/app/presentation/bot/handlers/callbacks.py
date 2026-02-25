@@ -1,10 +1,7 @@
 """Callback handlers for inline button interactions.
 
-This module handles callbacks from inline buttons (Discuss, reactions).
+This module handles callbacks from inline buttons (Discuss, reactions, save).
 Implements full functionality for all buttons.
-
-Note: Read and Save buttons have been removed as redundant. The message now includes
-direct links to the article and HN discussion.
 """
 
 import logging
@@ -17,7 +14,11 @@ from aiogram.types import CallbackQuery
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.interfaces import ActivityLogRepository
 from app.infrastructure.database.models import Delivery, Post, User
+from app.infrastructure.repositories.postgres.activity_log_repo import (
+    PostgresActivityLogRepository,
+)
 from app.presentation.bot.states import BotStates
 
 logger = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ async def handle_discuss(callback: CallbackQuery, state: FSMContext, session: As
 async def handle_react_up(callback: CallbackQuery, session: AsyncSession):
     """Handle thumbs up reaction callback.
 
-    Records positive reaction in delivery record.
+    Records positive reaction in delivery record and logs activity.
 
     Args:
         callback: Callback query from button press
@@ -128,12 +129,21 @@ async def handle_react_up(callback: CallbackQuery, session: AsyncSession):
         delivery = result.scalar_one_or_none()
 
         if delivery:
-            # Update reaction
+            # Update reaction on delivery (preserve existing behavior)
             delivery.reaction = "up"
             await session.commit()
             logger.info(f"Updated delivery reaction: user={user.id}, post={post_id}, reaction=up")
 
-        await callback.answer("👍 Thanks for your feedback!", show_alert=False)
+        # Log activity to activity_log table
+        activity_repo = PostgresActivityLogRepository(session)
+        try:
+            await activity_repo.log_activity(user.id, post_id, "rate_up")
+            logger.info(f"Logged activity: user={user.id}, post={post_id}, action=rate_up")
+        except Exception as log_error:
+            logger.warning(f"Failed to log activity: {log_error}")
+            # Continue - do not fail user feedback on logging error
+
+        await callback.answer("👍 Summary rated helpful — thanks!", show_alert=False)
 
     except Exception as e:
         logger.error(f"Error recording upvote: {e}", exc_info=True)
@@ -144,7 +154,7 @@ async def handle_react_up(callback: CallbackQuery, session: AsyncSession):
 async def handle_react_down(callback: CallbackQuery, session: AsyncSession):
     """Handle thumbs down reaction callback.
 
-    Records negative reaction in delivery record.
+    Records negative reaction in delivery record and logs activity.
 
     Args:
         callback: Callback query from button press
@@ -176,12 +186,21 @@ async def handle_react_down(callback: CallbackQuery, session: AsyncSession):
         delivery = result.scalar_one_or_none()
 
         if delivery:
-            # Update reaction
+            # Update reaction on delivery (preserve existing behavior)
             delivery.reaction = "down"
             await session.commit()
             logger.info(f"Updated delivery reaction: user={user.id}, post={post_id}, reaction=down")
 
-        await callback.answer("👎 Thanks for your feedback!", show_alert=False)
+        # Log activity to activity_log table
+        activity_repo = PostgresActivityLogRepository(session)
+        try:
+            await activity_repo.log_activity(user.id, post_id, "rate_down")
+            logger.info(f"Logged activity: user={user.id}, post={post_id}, action=rate_down")
+        except Exception as log_error:
+            logger.warning(f"Failed to log activity: {log_error}")
+            # Continue - do not fail user feedback on logging error
+
+        await callback.answer("👎 Noted — thanks for the feedback!", show_alert=False)
 
     except Exception as e:
         logger.error(f"Error recording downvote: {e}", exc_info=True)
@@ -201,6 +220,47 @@ async def handle_view_posts(callback: CallbackQuery):
 
     # This is just a helper button for batch header
     # Posts should already be visible in chat
+
+
+@callback_router.callback_query(F.data.startswith("save_post_"))
+async def handle_save_post(callback: CallbackQuery, session: AsyncSession):
+    """Handle Save for later button callback.
+
+    Logs a 'save' activity to track user interest without affecting delivery.
+
+    Args:
+        callback: Callback query from button press
+        session: Database session
+    """
+    post_id = callback.data.replace("save_post_", "")
+    telegram_id = callback.from_user.id
+
+    logger.info(f"Save button pressed by user {telegram_id} for post {post_id}")
+
+    try:
+        # Find user
+        stmt = select(User).where(User.telegram_id == telegram_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if not user:
+            await callback.answer("❌ User not found.", show_alert=True)
+            return
+
+        # Log activity to activity_log table
+        activity_repo = PostgresActivityLogRepository(session)
+        try:
+            await activity_repo.log_activity(user.id, post_id, "save")
+            logger.info(f"Logged activity: user={user.id}, post={post_id}, action=save")
+        except Exception as log_error:
+            logger.warning(f"Failed to log activity: {log_error}")
+            # Continue - do not fail user feedback on logging error
+
+        await callback.answer("🔖 Post saved for later reading!", show_alert=False)
+
+    except Exception as e:
+        logger.error(f"Error saving post: {e}", exc_info=True)
+        await callback.answer("🔖 Save noted!", show_alert=False)
 
 
 # Export router

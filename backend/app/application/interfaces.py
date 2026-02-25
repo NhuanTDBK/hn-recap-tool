@@ -388,6 +388,29 @@ class ConversationRepository(ABC):
         pass
 
 
+class ActivityLogRepository(ABC):
+    """Interface for append-only activity log storage (feedback tracking)."""
+
+    @abstractmethod
+    async def log_activity(
+        self,
+        user_id: int,
+        post_id: str,
+        action_type: str,
+    ) -> dict:
+        """Log a user activity (rating or save).
+
+        Args:
+            user_id: User who performed the action
+            post_id: Post being acted upon
+            action_type: Type of action ("rate_up", "rate_down", "save")
+
+        Returns:
+            Activity log record with ID and timestamp
+        """
+        pass
+
+
 # External Service Interfaces
 
 class HNService(ABC):

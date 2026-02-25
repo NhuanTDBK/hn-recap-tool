@@ -199,8 +199,8 @@ class InlineKeyboardBuilder:
         """Build inline keyboard for a post message.
 
         Returns button structure for:
-        - Discuss button (💬) - Start AI discussion about the post
-        - Reaction buttons (👍 👎) - Express interest/feedback
+        - Row 1: Discuss button (💬) and reaction buttons (👍 👎)
+        - Row 2: Save for later button (🔖)
 
         Args:
             post_id: Post ID (UUID string)
@@ -223,6 +223,13 @@ class InlineKeyboardBuilder:
                     {
                         "text": "👎",
                         "callback_data": f"react_down_{post_id}",
+                    },
+                ],
+                # Row 2: Save for later button
+                [
+                    {
+                        "text": "🔖 Save for later",
+                        "callback_data": f"save_post_{post_id}",
                     },
                 ],
             ]
