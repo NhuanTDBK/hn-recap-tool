@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class RocksDBContentStore(ContentRepository):
     """RocksDB-based content storage with column families."""
 
-    def __init__(self, db_path: str = "data/content.rocksdb", read_only: bool = False):
+    def __init__(self, db_path: str = "data/content.rocksdb", read_only: bool = True):
         """Initialize RocksDB content store.
 
         Args:

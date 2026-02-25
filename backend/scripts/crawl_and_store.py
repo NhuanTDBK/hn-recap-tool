@@ -67,8 +67,8 @@ class HNCrawler:
             respect_robots_txt=True
         )
 
-        # Initialize RocksDB content store (write mode — crawler is the single writer)
-        self.content_store = RocksDBContentStore(db_path=rocksdb_path)
+        # Initialize RocksDB content store (write mode — crawler is the sole writer)
+        self.content_store = RocksDBContentStore(db_path=rocksdb_path, read_only=False)
         self.rocksdb_path = rocksdb_path
 
         self.semaphore = asyncio.Semaphore(max_concurrent)

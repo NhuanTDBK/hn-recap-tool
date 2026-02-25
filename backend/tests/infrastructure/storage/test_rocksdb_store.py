@@ -26,7 +26,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_save_and_retrieve_html(self, temp_db_path):
         """Test saving and retrieving HTML content."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         hn_id = 12345
         html_content = "<html><body>Test content</body></html>"
@@ -43,7 +43,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_save_and_retrieve_text(self, temp_db_path):
         """Test saving and retrieving text content."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         hn_id = 12345
         text_content = "This is plain text content for testing."
@@ -60,7 +60,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_save_and_retrieve_markdown(self, temp_db_path):
         """Test saving and retrieving markdown content."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         hn_id = 12345
         markdown_content = "# Test\n\nThis is **markdown** content."
@@ -77,7 +77,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_save_all_formats(self, temp_db_path):
         """Test saving all three content formats."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         hn_id = 12345
         html = "<html><body>HTML</body></html>"
@@ -100,7 +100,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_content_exists(self, temp_db_path):
         """Test checking if content exists."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         hn_id = 12345
 
@@ -124,7 +124,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_get_nonexistent_content(self, temp_db_path):
         """Test retrieving non-existent content returns None."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         hn_id = 99999
 
@@ -141,7 +141,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_delete_content(self, temp_db_path):
         """Test deleting all content for a post."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         hn_id = 12345
 
@@ -169,7 +169,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_get_stats(self, temp_db_path):
         """Test getting database statistics."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         # Save multiple posts
         for hn_id in [100, 200, 300]:
@@ -193,7 +193,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_multiple_posts(self, temp_db_path):
         """Test storing content for multiple posts."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         posts = {
             100: ("HTML 1", "Text 1", "MD 1"),
@@ -216,7 +216,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_unicode_content(self, temp_db_path):
         """Test storing Unicode content."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         hn_id = 12345
         unicode_content = "Hello 世界! 🚀 Testing émojis and spëcial çharacters"
@@ -230,7 +230,7 @@ class TestRocksDBContentStore:
     @pytest.mark.asyncio
     async def test_large_content(self, temp_db_path):
         """Test storing large content."""
-        store = RocksDBContentStore(db_path=temp_db_path)
+        store = RocksDBContentStore(db_path=temp_db_path, read_only=False)
 
         hn_id = 12345
         large_content = "A" * 1_000_000  # 1MB of data
@@ -248,12 +248,12 @@ class TestRocksDBContentStore:
         hn_id = 12345
         test_content = "Test content"
 
-        with RocksDBContentStore(db_path=temp_db_path) as store:
+        with RocksDBContentStore(db_path=temp_db_path, read_only=False) as store:
             await store.save_text_content(hn_id, test_content)
             retrieved = await store.get_text_content(hn_id)
             assert retrieved == test_content
 
         # Verify store was closed (new instance should be able to open)
-        with RocksDBContentStore(db_path=temp_db_path) as store2:
+        with RocksDBContentStore(db_path=temp_db_path, read_only=False) as store2:
             retrieved2 = await store2.get_text_content(hn_id)
             assert retrieved2 == test_content
