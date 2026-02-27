@@ -18,30 +18,31 @@ A Telegram bot that delivers curated Hacker News summaries to your DM and lets y
 │  │ Poll HN    │  │ Generate   │  │ Track      │  │ Deliver  │ │
 │  │ Crawl URLs │  │ summaries  │  │ interests  │  │ digests  │ │
 │  │ HTML → MD  │  │ via LLM    │  │ Store      │  │ Handle   │ │
-│  │ Store      │  │ Skip Ask/  │  │ convos     │  │ commands │ │
-│  │ metadata   │  │ Show HN    │  │ Extract    │  │ Manage   │ │
-│  │            │  │            │  │ insights   │  │ discuss  │ │
+│  │ Store      │  │ 5 variants │  │ convos     │  │ commands │ │
+│  │ metadata   │  │ + caching  │  │ Extract    │  │ Manage   │ │
+│  │            │  │ + tracking │  │ insights   │  │ discuss  │ │
 │  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘  └────┬─────┘ │
 │        │               │               │               │       │
 │        └───────────┬───┴───────────┬───┘               │       │
 │                    ▼               ▼                    │       │
 │             ┌────────────┐  ┌────────────┐             │       │
-│             │ PostgreSQL │  │    S3      │             │       │
-│             │ (Supabase) │  │            │             │       │
+│             │ PostgreSQL │  │  RocksDB   │             │       │
+│             │   (RDS)    │  │            │             │       │
 │             │            │  │ HTML files │             │       │
 │             │ users      │  │ MD files   │             │       │
-│             │ posts      │  │            │             │       │
+│             │ posts      │  │ (local FS) │             │       │
+│             │ summaries  │  │            │             │       │
 │             │ deliveries │  └────────────┘             │       │
 │             │ convos     │                             │       │
-│             │ memory     │◀────────────────────────────┘       │
-│             └────────────┘                                     │
+│             └────────────┘◀─────────────────────────────┘       │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │  Infrastructure                                          │  │
-│  │  Vercel ── bot server + cron jobs                        │  │
-│  │  Supabase ── PostgreSQL                                  │  │
-│  │  S3 ── file storage (HTML + Markdown)                    │  │
-│  │  Claude API ── summarization + chat                      │  │
+│  │  AWS EC2 ── app servers + background jobs               │  │
+│  │  AWS RDS ── PostgreSQL (managed database)               │  │
+│  │  AWS S3 ── backups, logs, exports                       │  │
+│  │  OpenAI API ── gpt-4o-mini for summarization           │  │
+│  │  Langfuse ── LLM observability & token tracking         │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -50,19 +51,22 @@ A Telegram bot that delivers curated Hacker News summaries to your DM and lets y
 
 **Ingest**
 
-- Poll HN API (`/topstories`, `/beststories`) on schedule via Vercel cron
+- Poll HN API (`/topstories`, `/beststories`) via APScheduler (hourly)
 - Skip `Ask HN` and `Show HN` posts
 - For each qualifying post: fetch the linked URL, crawl HTML content
-- Convert HTML → clean Markdown (via trafilatura or similar)
+- Convert HTML → clean Markdown (via trafilatura + markitdown)
 - Save metadata (title, url, score, comment_count, hn_id, type) to PostgreSQL
-- Save raw HTML and converted Markdown to S3, store file references in DB
+- Save HTML, text, and Markdown to RocksDB (local filesystem with Zstandard compression)
 
 **Summarize**
 
-- Runs after ingest (or as part of same pipeline)
-- Reads Markdown content from S3
-- Calls Claude API to generate 2-3 sentence summary
-- Stores summary back in PostgreSQL
+- Runs after ingest via APScheduler (every 30 minutes)
+- Reads Markdown content from RocksDB
+- Uses OpenAI Agents SDK (gpt-4o-mini model) to generate summaries
+- 5 prompt variants: basic, technical, business, concise, personalized
+- User can choose preferred summary style (stored in `users.summary_preferences`)
+- Each summary tracked with token usage in `agent_calls` and aggregated in `user_token_usage`
+- Stores summaries in PostgreSQL for fast retrieval
 - Only processes posts that have not been summarized yet
 
 **Memory**
@@ -75,88 +79,284 @@ A Telegram bot that delivers curated Hacker News summaries to your DM and lets y
 
 **Bot**
 
-- Telegram bot server running on Vercel
+- Telegram bot server running on AWS EC2
 - Delivers digest messages on schedule
 - Handles inline button callbacks (discuss, reactions)
 - Manages discussion state (active post per user, auto-switch)
 - Routes commands
-- **Note**: Read and Save buttons removed (links now embedded in messages)
+- Read and Save button links now embedded directly in message text (Markdown format)
 
 ---
 
-## Data Model (PostgreSQL on Supabase)
+## Data Model (PostgreSQL)
 
-```sql
-users (
-  id UUID PRIMARY KEY,
-  telegram_id BIGINT UNIQUE,
-  username TEXT,
-  interests JSONB,               -- ["distributed systems", "rust", ...]
-  active_discussion_post_id UUID,
-  memory_enabled BOOLEAN DEFAULT true,
-  status TEXT DEFAULT 'active',  -- active | paused
-  created_at TIMESTAMPTZ
-)
+### Core Tables
 
-posts (
+```python
+# posts — HackerNews posts with crawled content metadata
+posts {
   id UUID PRIMARY KEY,
-  hn_id INT UNIQUE,
-  type TEXT,                     -- story | ask_hn | show_hn
+  hn_id INT UNIQUE,              -- HackerNews post ID
+  type TEXT,                     -- story | ask | show | job
   title TEXT,
+  author TEXT,
   url TEXT,
-  domain TEXT,
+  domain TEXT,                   -- extracted from URL
   score INT,
   comment_count INT,
-  html_s3_key TEXT,              -- s3://hn-pal/html/{hn_id}.html
-  markdown_s3_key TEXT,          -- s3://hn-pal/md/{hn_id}.md
-  summary TEXT,
+  
+  # Content storage (tracks what's in RocksDB)
+  has_html BOOLEAN,              -- raw HTML in RocksDB
+  has_text BOOLEAN,              -- extracted plain text
+  has_markdown BOOLEAN,          -- converted markdown
+  
+  # Crawl tracking
+  is_crawl_success BOOLEAN,
+  crawl_retry_count INT,
+  crawl_error TEXT,
+  crawled_at TIMESTAMPTZ,
+  content_length INT,
+  
+  # HN metadata
+  is_dead BOOLEAN,
+  is_deleted BOOLEAN,
+  
+  # Summary (basic summary for quick access, full summaries in summaries table)
+  summary TEXT,                  -- fallback basic summary
   summarized_at TIMESTAMPTZ,
-  fetched_at TIMESTAMPTZ,
-  hn_published_at TIMESTAMPTZ
-)
+  
+  # Timestamps
+  created_at TIMESTAMPTZ,        -- HN post creation time
+  collected_at TIMESTAMPTZ,      -- when we collected it
+  updated_at TIMESTAMPTZ
+}
 
-deliveries (
+# users — Telegram users with preferences and subscription state
+users {
+  id INT PRIMARY KEY,
+  telegram_id BIGINT UNIQUE,
+  username TEXT(255),
+  
+  # Preferences
+  interests JSON,                -- ["distributed systems", "rust", ...]
+  memory_enabled BOOLEAN DEFAULT true,
+  status TEXT(50),               -- active | paused | blocked
+  delivery_style TEXT(50),       -- flat_scroll | brief
+  summary_preferences JSON,      -- {style: "basic", detail_level: "medium", ...}
+  
+  # Tracking
+  last_delivered_at TIMESTAMPTZ,
+  
+  # Timestamps
+  created_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ,
+  
+  # Relationships
+  - summaries (1:N) cascade
+  - token_usage (1:N) cascade
+  - agent_calls (1:N) cascade
+  - deliveries (1:N) cascade
+  - conversations (1:N) cascade
+}
+
+# summaries — Personalized summaries per user/post/style
+summaries {
+  id INT PRIMARY KEY,
+  post_id UUID FOREIGN KEY,
+  user_id INT FOREIGN KEY,
+  
+  # Summary data
+  prompt_type TEXT(50),          -- basic | technical | business | concise | personalized
+  summary_text TEXT,             -- the actual summary (2-3 sentences)
+  key_points JSON,               -- extracted key points if structured output
+  technical_level TEXT(50),      -- beginner | intermediate | advanced
+  
+  # Cost tracking
+  token_count INT,
+  cost_usd DECIMAL(10, 6),
+  
+  # User feedback
+  rating INT,                    -- 1-5 stars
+  user_feedback TEXT,
+  
+  # Timestamps
+  created_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ,
+  
+  # Unique constraint: one summary per (user_id, post_id, prompt_type)
+}
+
+# deliveries — Tracks which posts were sent to which users
+deliveries {
   id UUID PRIMARY KEY,
-  user_id UUID REFERENCES users,
-  post_id UUID REFERENCES posts,
-  message_id BIGINT,             -- telegram message id
-  batch_id TEXT,                  -- groups posts in same digest
-  reaction TEXT,                  -- up | down | null
+  user_id INT FOREIGN KEY,
+  post_id UUID FOREIGN KEY,
+  
+  # Delivery metadata
+  message_id INT,                -- Telegram message ID
+  batch_id TEXT,                 -- groups posts in same digest
+  reaction TEXT,                 -- "up" | "down" | null (user interaction)
+  
+  # Timestamps
   delivered_at TIMESTAMPTZ
-)
+}
 
-conversations (
+# conversations — Discussion threads per user per post
+conversations {
   id UUID PRIMARY KEY,
-  user_id UUID REFERENCES users,
-  post_id UUID REFERENCES posts,
-  messages JSONB,                -- [{role, content, timestamp}, ...]
-  token_usage JSONB,             -- {input_tokens, output_tokens}
+  user_id INT FOREIGN KEY,
+  post_id UUID FOREIGN KEY,
+  
+  # Conversation data
+  messages JSON,                 -- [{role, content, timestamp}, ...]
+  token_usage JSON,              -- {input_tokens, output_tokens, model}
+  
+  # Timestamps
   started_at TIMESTAMPTZ,
-  ended_at TIMESTAMPTZ
-)
+  ended_at TIMESTAMPTZ          -- null if still active
+}
 
-memory (
-  id UUID PRIMARY KEY,
-  user_id UUID REFERENCES users,
-  type TEXT,                     -- interest | fact | discussion_note
-  content TEXT,
-  source_post_id UUID,
-  active BOOLEAN DEFAULT true,
+# user_token_usage — Daily aggregated token tracking per user
+user_token_usage {
+  id INT PRIMARY KEY,
+  user_id INT FOREIGN KEY,
+  date DATE,
+  model TEXT(50),                -- gpt-4o-mini | gpt-4o | etc
+  
+  # Token counts
+  input_tokens INT,
+  output_tokens INT,
+  total_tokens INT,
+  
+  # Cost
+  cost_usd DECIMAL(10, 6),
+  request_count INT,
+  
+  # Timestamps
+  created_at TIMESTAMPTZ,
+  
+  # Unique constraint: one per (user_id, date, model)
+}
+
+# agent_calls — Individual agent call tracking for debugging/observability
+agent_calls {
+  id INT PRIMARY KEY,
+  user_id INT FOREIGN KEY,
+  
+  # Call details
+  trace_id TEXT,                 -- Langfuse trace ID
+  agent_name TEXT(100),          -- SummarizationAgent | DiscussionAgent | etc
+  operation TEXT(100),           -- summarize_post | answer_question | etc
+  model TEXT(50),                -- gpt-4o-mini | gpt-4o | etc
+  
+  # Token usage
+  input_tokens INT,
+  output_tokens INT,
+  total_tokens INT,
+  cost_usd DECIMAL(10, 6),
+  
+  # Performance
+  latency_ms INT,                -- Response time in milliseconds
+  status TEXT(20),               -- success | error
+  
+  # Error tracking
+  error_message TEXT,
+  
+  # Timestamps
   created_at TIMESTAMPTZ
-)
+}
+
+# user_activity_log — Append-only log of user interactions
+user_activity_log {
+  id UUID PRIMARY KEY,
+  user_id INT FOREIGN KEY,
+  post_id UUID FOREIGN KEY,
+  
+  # Action details
+  action_type TEXT(20),          -- rate_up | rate_down | save
+  
+  # Timestamps
+  created_at TIMESTAMPTZ
+}
 ```
 
-**S3 structure:**
+### Content Storage (RocksDB)
+
+Content is stored in **RocksDB** (local filesystem, not S3) for performance:
 
 ```
-hn-pal/
-  html/{hn_id}.html     -- raw crawled HTML
-  md/{hn_id}.md          -- converted markdown
+rocksdb_data/
+  html/{post_id}        -- raw crawled HTML (~200KB per post)
+  text/{post_id}        -- extracted plain text (~50KB per post)
+  md/{post_id}          -- converted markdown (~30KB per post)
 ```
+
+**Why RocksDB?**
+
+- High throughput for write-heavy ingest pipelines (~100 posts/hour)
+- Zstandard compression reduces disk usage by ~70%
+- Local filesystem access (faster than S3 GET requests)
+- Self-contained in Docker volume (no external dependencies)
+- Read-only access from summarizer (safe concurrent access)
 
 ---
 
-## Message Templates
+## Summary Styles & Personalization
+
+HN Pal supports **5 summary variants** tailored to different users' preferences and technical backgrounds:
+
+### Summary Style Variants
+
+| Style | Audience | Example | Characteristics |
+| ----- | -------- | ------- | --------------- |
+| **basic** | General developers | 2–3 sentences, 50–80 words | Balanced depth, clear for non-specialists, highlights practical impact |
+| **technical** | Senior engineers | Implementation details, algorithms, trade-offs | Deep technical terminology, protocols, benchmarks, architectural decisions |
+| **business** | CTOs, managers | Non-technical language, cost & ROI | Strategic business value, competitive positioning, market impact |
+| **concise** | Busy developers | 1 sentence, ≤30 words | Ultra-brief headline-style summary |
+| **personalized** | Individual users | Interest-aware, contextual | Tailored to user's past interests and discussion history |
+
+### User Summary Preferences
+
+The `users` table stores each user's preferred style in the `summary_preferences` JSON field:
+
+```json
+{
+  "style": "basic",
+  "detail_level": "medium",
+  "technical_depth": "intermediate"
+}
+```
+
+Users can configure their preference via `/preferences` command during onboarding or at any time.
+
+### Cost & Token Tracking
+
+**Per-call tracking** (`agent_calls` table):
+
+- Trace ID (Langfuse)
+- Input/output tokens
+- Cost in USD (calculated from OpenAI pricing)
+- Latency in milliseconds
+
+**Per-user daily aggregation** (`user_token_usage` table):
+
+- Daily totals grouped by model (gpt-4o-mini, gpt-4o, etc.)
+- Cost in USD
+- Request count
+
+**Pricing** (as of 2026-02):
+
+- gpt-4o-mini: $0.15 per 1M input tokens, $0.60 per 1M output tokens
+- Realistic cost per summary: ~$0.00015 per input + $0.0003 per output = ~$0.0005 total
+- Daily cost for 200 posts: ~$0.10 per day
+
+**Langfuse integration**:
+
+- All agent calls automatically traced
+- Dashboard shows per-user usage trends
+- Budget alerts for cost anomalies
+
+---
 
 ### Style 1: Brief Digest (default)
 
@@ -421,10 +621,10 @@ No explicit end button.
 ## Ingest Pipeline Flow
 
 ```
-┌───────────────┐
-│  Vercel Cron  │
-│  (every 2h)   │
-└───────┬───────┘
+┌─────────────────┐
+│  APScheduler    │
+│  (every hour)   │
+└───────┬─────────┘
         │
         ▼
 ┌─────────────────┐
@@ -441,7 +641,7 @@ No explicit end button.
 │  ✗ Skip Show HN │
 │  ✗ Skip if      │
 │    already in DB│
-│  ✓ Score > 100  │
+│  ✓ Score > 50   │
 └────────┬────────┘
          │ new posts only
          ▼
@@ -454,42 +654,61 @@ No explicit end button.
 │  2. Get raw     │
 │     HTML        │
 │                 │
-│  3. Upload HTML │
-│     to S3       │
+│  3. Store HTML  │
+│     to RocksDB  │
 │     html/{id}   │
 │                 │
-│  4. HTML → MD   │
+│  4. HTML → Text │
+│     → MD        │
 │     (trafilat-  │
 │      ura)       │
 │                 │
-│  5. Upload MD   │
-│     to S3       │
+│  5. Store Text  │
+│     & MD to     │
+│     RocksDB     │
+│     text/{id}   │
 │     md/{id}     │
 │                 │
 │  6. Insert post │
 │     metadata    │
 │     to DB       │
+│                 │
+│  7. Mark flags: │
+│     is_crawl_   │
+│     success=T   │
 └────────┬────────┘
          │
          ▼
-┌─────────────────┐
-│  Summarize      │
-│                 │
-│  Read MD from   │
-│  S3 → Claude    │
-│  API → 2-3 line │
-│  summary → save │
-│  to DB          │
-└────────┬────────┘
+┌──────────────────┐
+│  Summarize       │
+│  (every 30 min)  │
+│                  │
+│  Read unsumm.    │
+│  posts from DB   │
+│                  │
+│  Get MD content  │
+│  from RocksDB    │
+│  ↓              │
+│  OpenAI Agent    │
+│  (gpt-4o-mini)   │
+│  ↓              │
+│  Store summary   │
+│  to DB + track   │
+│  tokens in       │
+│  agent_calls &   │
+│  user_token_     │
+│  usage tables    │
+└────────┬─────────┘
          │
          ▼
-┌─────────────────┐
-│  Deliver        │
-│                 │
+┌──────────────────┐
+│  Deliver         │
+│  (every hour)    │
+│                  │
 │  For each       │
 │  active user:   │
 │  · Check if     │
-│    digest time  │
+│    delivery time│
 │  · Collect un-  │
 │    delivered    │
 │    posts        │
@@ -501,7 +720,7 @@ No explicit end button.
 │    1 or 2)      │
 │  · Log to       │
 │    deliveries   │
-└─────────────────┘
+└──────────────────┘
 ```
 
 ---
@@ -530,7 +749,7 @@ User taps [💬 Discuss]
 ┌──────────────────┐
 │ Load context     │
 │                  │
-│ From S3:         │
+│ From RocksDB:    │
 │ · article.md     │
 │                  │
 │ From DB:         │
@@ -555,7 +774,7 @@ User taps [💬 Discuss]
 │ User message     │     │
 │       │          │     │
 │       ▼          │     │
-│ Claude API:      │     │
+│ OpenAI API:      │     │
 │ · system: article│     │
 │   + memory +     │     │
 │   convo history  │     │
@@ -596,45 +815,56 @@ User taps [💬 Discuss]
 
 ```
 /start          Onboarding + pick interests
+/preferences    Set summary style (basic, technical, business, concise, personalized)
 /pause          Pause / resume deliveries (toggle)
 /saved          Show bookmarked posts
 /memory         View what bot remembers
 /memory pause   Toggle memory on/off
 /memory forget  Forget a specific topic (interactive)
 /memory clear   Full memory reset
-/token          Show token usage stats
+/token          Show token usage stats + cost
 ```
 
-That's it. Everything else happens through inline buttons on messages.
+Everything else happens through inline buttons on messages.
 
 ---
 
 ## Tech Stack
 
-| Component       | Choice                    |
-| --------------- | ------------------------- |
-| Language        | Python                    |
-| Bot framework   | aiogram 3.x               |
-| Database        | PostgreSQL (Supabase)     |
-| File storage    | S3                        |
-| Cron            | Vercel Cron               |
-| Bot hosting     | Vercel (serverless)       |
-| LLM             | Claude API                |
-| HTML extraction | trafilatura               |
-| HTML → Markdown | trafilatura / markdownify |
+| Component | Choice |
+| --------- | ------ |
+| Language | Python 3.10+ |
+| Bot framework | aiogram 3.x |
+| Database | PostgreSQL + asyncpg |
+| Content storage | RocksDB + Zstandard compression |
+| LLM API | OpenAI Agents SDK (gpt-4o-mini) |
+| Observability | Langfuse |
+| Package manager | uv |
+| Migrations | Alembic |
+| Compute | AWS EC2 |
+| Infrastructure | Terraform + AWS |
+| Content extraction | trafilatura + markitdown |
+| Task scheduling | APScheduler |
 
 ---
 
-## Build Order
+## Build Order & Implementation Status
 
-| Phase | Scope                                                |
-| ----- | ---------------------------------------------------- |
-| 1     | Ingest: HN poll → crawl → HTML → MD → S3 + DB        |
-| 2     | Summarize: read MD from S3 → Claude → store summary  |
-| 3     | Bot: /start + deliver flat scroll digests to your DM |
-| 4     | Inline buttons: Discuss, 👍👎 (Read/Save removed)   |
-| 5     | Discussion flow with article context                 |
-| 6     | Memory: track + extract + surface in discussions     |
-| 7     | Commands: /memory, /saved, /token, /pause            |
+| Phase | Scope | Status |
+| ----- | ----- | ------ |
+| 1 | Ingest: HN poll → crawl → HTML → MD → RocksDB + DB | ✅ Complete |
+| 2 | Summarize: OpenAI Agents, 5 variants, tokens | 🔄 80% In Progress |
+| 3 | Bot: /start + deliver flat scroll digests | ✅ Complete |
+| 4 | Inline buttons: Discuss, 👍👎 reactions | ✅ Complete |
+| 5 | Discussion flow with article context | 📝 Planned |
+| 6 | Memory: track + extract + surface | 📝 Planned |
+| 7 | Commands: /memory, /saved, /token, /pause | 🔄 In Progress |
+| 8 | Improvements: watermark fix, crawler daemon | 🔄 In Progress |
+| 9 | AWS deployment: Terraform IaC | ✅ Complete |
 
-**Status (2026-02-15)**: Phases 1-4 complete. Format updated with clickable Markdown links.
+**Current Status (2026-02-26)**:
+
+- **Core functionality**: Ingest → Summarize → Deliver loop working
+- **Phase 2 progress**: LLM integration complete; 5-variant prompt framework; summary preferences in User model; cost tracking via Langfuse  
+- **Phase 8 improvements**: Fixed summarizer watermark (collected_at rolling window); added crawler daemon to docker-compose
+- **Production ready**: AWS infrastructure (VPC, RDS, S3, EC2, IAM) provisioned via Terraform
