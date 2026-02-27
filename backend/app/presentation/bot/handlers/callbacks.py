@@ -20,6 +20,7 @@ from app.infrastructure.repositories.postgres.activity_log_repo import (
     PostgresActivityLogRepository,
 )
 from app.presentation.bot.states import BotStates
+from app.presentation.bot.formatters.digest_formatter import DigestMessageFormatter, InlineKeyboardBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,24 @@ async def handle_react_up(callback: CallbackQuery, session: AsyncSession):
             logger.warning(f"Failed to log activity: {log_error}")
             # Continue - do not fail user feedback on logging error
 
+        # Swap keyboard back to default menu (best-effort, don't fail UX)
+        try:
+            SUMMARY_TRUNCATE_LENGTH = 500
+            message_text = callback.message.text or ""
+            is_expanded = len(message_text) > (SUMMARY_TRUNCATE_LENGTH + 50)
+
+            builder = InlineKeyboardBuilder()
+            keyboard = (
+                builder.build_post_keyboard_without_more(post_id)
+                if is_expanded
+                else builder.build_post_keyboard(post_id)
+            )
+            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            logger.debug(f"Swapped keyboard back to default for post {post_id}")
+        except Exception as keyboard_error:
+            logger.warning(f"Failed to swap keyboard back: {keyboard_error}")
+            # Continue - keyboard swap is best-effort
+
         await callback.answer("👍 Summary rated helpful — thanks!", show_alert=False)
 
     except Exception as e:
@@ -199,6 +218,24 @@ async def handle_react_down(callback: CallbackQuery, session: AsyncSession):
         except Exception as log_error:
             logger.warning(f"Failed to log activity: {log_error}")
             # Continue - do not fail user feedback on logging error
+
+        # Swap keyboard back to default menu (best-effort, don't fail UX)
+        try:
+            SUMMARY_TRUNCATE_LENGTH = 500
+            message_text = callback.message.text or ""
+            is_expanded = len(message_text) > (SUMMARY_TRUNCATE_LENGTH + 50)
+
+            builder = InlineKeyboardBuilder()
+            keyboard = (
+                builder.build_post_keyboard_without_more(post_id)
+                if is_expanded
+                else builder.build_post_keyboard(post_id)
+            )
+            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            logger.debug(f"Swapped keyboard back to default for post {post_id}")
+        except Exception as keyboard_error:
+            logger.warning(f"Failed to swap keyboard back: {keyboard_error}")
+            # Continue - keyboard swap is best-effort
 
         await callback.answer("👎 Noted — thanks for the feedback!", show_alert=False)
 
@@ -261,6 +298,172 @@ async def handle_save_post(callback: CallbackQuery, session: AsyncSession):
     except Exception as e:
         logger.error(f"Error saving post: {e}", exc_info=True)
         await callback.answer("🔖 Save noted!", show_alert=False)
+
+
+@callback_router.callback_query(F.data.startswith("show_more_"))
+async def handle_show_more(callback: CallbackQuery, session: AsyncSession):
+    """Handle Show More button callback.
+
+    Expands truncated summary inline by editing the message text and keyboard.
+    Uses format_post_message_full() to display the complete summary.
+    Removes the 'More' button from keyboard after expansion.
+    Logs activity as 'show_more' event.
+
+    Args:
+        callback: Callback query from button press
+        session: Database session
+    """
+    post_id = callback.data.replace("show_more_", "")
+    telegram_id = callback.from_user.id
+
+    logger.info(f"Show More button pressed by user {telegram_id} for post {post_id}")
+
+    try:
+        # Find user
+        stmt = select(User).where(User.telegram_id == telegram_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if not user:
+            await callback.answer("❌ User not found.", show_alert=True)
+            return
+
+        # Load post from database
+        stmt = select(Post).where(Post.id == UUID(post_id))
+        result = await session.execute(stmt)
+        post = result.scalar_one_or_none()
+
+        if not post:
+            await callback.answer("❌ Post not found.", show_alert=True)
+            return
+
+        # Format the full message with untruncated summary
+        formatter = DigestMessageFormatter()
+        # We need position and total for formatting, but we can infer from message or use defaults
+        # For now, use reasonable defaults (1/1 since we're just showing the post)
+        full_text = formatter.format_post_message_full(post, position=1, total=1)
+
+        # Build keyboard without "More" button
+        builder = InlineKeyboardBuilder()
+        keyboard = builder.build_post_keyboard_without_more(post_id)
+
+        # Update message with expanded summary and new keyboard
+        try:
+            await callback.message.edit_message_text(text=full_text)
+            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            logger.info(f"Expanded message for post {post_id}")
+        except Exception as edit_error:
+            logger.warning(f"Failed to edit message: {edit_error}")
+            # Gracefully handle if message can't be edited (too old, etc.)
+            await callback.answer("⚠️ Unable to expand (message too old).", show_alert=False)
+            return
+
+        # Log activity to activity_log table
+        activity_repo = PostgresActivityLogRepository(session)
+        try:
+            await activity_repo.log_activity(user.id, post_id, "show_more")
+            logger.info(f"Logged activity: user={user.id}, post={post_id}, action=show_more")
+        except Exception as log_error:
+            logger.warning(f"Failed to log activity: {log_error}")
+            # Continue - do not fail user feedback on logging error
+
+        await callback.answer("📖 Full summary loaded", show_alert=False)
+
+    except Exception as e:
+        logger.error(f"Error expanding summary: {e}", exc_info=True)
+        await callback.answer("❌ Error loading summary.", show_alert=True)
+
+
+@callback_router.callback_query(F.data.startswith("actions_"))
+async def handle_actions_menu(callback: CallbackQuery):
+    """Handle Actions button callback.
+
+    Swaps the keyboard from default menu to reactions menu.
+    Shows: [ 👍 Good Response ] [ 👎 Bad Response ] [ « Back ]
+
+    Args:
+        callback: Callback query from button press
+    """
+    post_id = callback.data.replace("actions_", "")
+    telegram_id = callback.from_user.id
+
+    logger.info(f"Actions button pressed by user {telegram_id} for post {post_id}")
+
+    try:
+        # Build reactions keyboard
+        builder = InlineKeyboardBuilder()
+        keyboard = builder.build_reactions_keyboard(post_id)
+
+        # Swap the keyboard
+        try:
+            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            logger.info(f"Swapped to reactions menu for post {post_id}")
+        except Exception as edit_error:
+            logger.warning(f"Failed to edit message keyboard: {edit_error}")
+            # Gracefully handle if message can't be edited
+            await callback.answer("⚠️ Unable to show menu (message too old).", show_alert=False)
+            return
+
+        await callback.answer("Choose a reaction", show_alert=False)
+
+    except Exception as e:
+        logger.error(f"Error swapping to actions menu: {e}", exc_info=True)
+        await callback.answer("❌ Error showing menu.", show_alert=True)
+
+
+@callback_router.callback_query(F.data.startswith("back_"))
+async def handle_back_to_default(callback: CallbackQuery):
+    """Handle Back button callback.
+
+    Swaps keyboard from reactions menu back to default menu.
+    Determines whether to show the 'More' button based on current message state:
+    - If summary is expanded (message text length > SUMMARY_TRUNCATE_LENGTH + buffer),
+      use keyboard without 'More' button
+    - If summary is truncated, use keyboard with 'More' button
+
+    Args:
+        callback: Callback query from button press
+    """
+    post_id = callback.data.replace("back_", "")
+    telegram_id = callback.from_user.id
+
+    logger.info(f"Back button pressed by user {telegram_id} for post {post_id}")
+
+    try:
+        # Check if summary was expanded by examining message text length
+        # SUMMARY_TRUNCATE_LENGTH is 500; full summaries typically > 800-1000
+        # Add buffer to account for title, links, and stats
+        SUMMARY_TRUNCATE_LENGTH = 500
+        message_text = callback.message.text or ""
+        is_expanded = len(message_text) > (SUMMARY_TRUNCATE_LENGTH + 50)
+
+        # Build appropriate keyboard
+        builder = InlineKeyboardBuilder()
+        if is_expanded:
+            # Summary is expanded, use keyboard without 'More' button
+            keyboard = builder.build_post_keyboard_without_more(post_id)
+            logger.debug(f"Summary is expanded for post {post_id}, using keyboard without More")
+        else:
+            # Summary is truncated, use default keyboard with 'More' button
+            keyboard = builder.build_post_keyboard(post_id)
+            logger.debug(f"Summary is truncated for post {post_id}, using default keyboard")
+
+        # Swap the keyboard
+        try:
+            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            logger.info(f"Returned to default menu for post {post_id}")
+        except Exception as edit_error:
+            logger.warning(f"Failed to edit message keyboard: {edit_error}")
+            # Gracefully handle if message can't be edited
+            await callback.answer("⚠️ Unable to show menu (message too old).", show_alert=False)
+            return
+
+        # Silent callback answer (no toast shown to user)
+        await callback.answer(show_alert=False)
+
+    except Exception as e:
+        logger.error(f"Error returning to default menu: {e}", exc_info=True)
+        await callback.answer("❌ Error showing menu.", show_alert=True)
 
 
 # Export router

@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Epic 9: Inline Button Redesign — Telegram Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 420px;
+            width: 100%;
+        }
+
+        .header {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .demo-section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #999;
+            text-transform: uppercase;
+            margin-bottom: 16px;
+            letter-spacing: 0.5px;
+        }
+
+        /* Telegram message style */
+        .telegram-message {
+            background: #f5f5f5;
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            border-left: 3px solid #0084ff;
+        }
+
+        .message-title {
+            font-weight: 600;
+            font-size: 16px;
+            color: #000;
+            margin-bottom: 8px;
+        }
+
+        .message-link {
+            color: #0084ff;
+            text-decoration: none;
+            font-size: 13px;
+            margin-bottom: 12px;
+            display: block;
+        }
+
+        .message-link:hover {
+            text-decoration: underline;
+        }
+
+        .message-summary {
+            font-size: 14px;
+            color: #333;
+            line-height: 1.5;
+            margin-bottom: 12px;
+        }
+
+        .message-summary.truncated {
+            max-height: 60px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .message-summary.truncated::after {
+            content: '...';
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            background: white;
+            padding-left: 4px;
+        }
+
+        .message-stats {
+            font-size: 12px;
+            color: #999;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        /* Inline keyboard */
+        .inline-keyboard {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        .keyboard-row {
+            display: flex;
+            gap: 6px;
+        }
+
+        .keyboard-btn {
+            flex: 1;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            color: #333;
+            text-align: center;
+        }
+
+        .keyboard-btn:hover {
+            background: #f0f0f0;
+            border-color: #bbb;
+        }
+
+        .keyboard-btn.active {
+            background: #0084ff;
+            color: white;
+            border-color: #0084ff;
+        }
+
+        .keyboard-btn:active {
+            transform: scale(0.98);
+        }
+
+        /* State indicator */
+        .state-badge {
+            display: inline-block;
+            background: #ddd;
+            color: #666;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .state-badge.default {
+            background: #e3f2fd;
+            color: #1565c0;
+        }
+
+        .state-badge.reactions {
+            background: #f3e5f5;
+            color: #6a1b9a;
+        }
+
+        .state-badge.expanded {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        /* Callback alert simulation */
+        .callback-alert {
+            background: #323232;
+            color: white;
+            padding: 12px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-bottom: 12px;
+            animation: slideUp 0.3s ease;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .callback-alert.show {
+            display: block;
+        }
+
+        .callback-alert.hide {
+            display: none;
+        }
+
+        /* Comparison table */
+        .comparison {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .comparison-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .comparison-row:last-child {
+            border-bottom: none;
+        }
+
+        .comparison-cell {
+            padding: 12px;
+            font-size: 13px;
+        }
+
+        .comparison-cell.header {
+            background: #f5f5f5;
+            font-weight: 600;
+            color: #666;
+        }
+
+        .comparison-cell.before {
+            border-right: 1px solid #ddd;
+            color: #999;
+            text-decoration: line-through;
+        }
+
+        .comparison-cell.after {
+            color: #2e7d32;
+            font-weight: 500;
+        }
+
+        /* Info box */
+        .info-box {
+            background: #e3f2fd;
+            border-left: 3px solid #1976d2;
+            padding: 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #1565c0;
+            margin-top: 16px;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        /* Responsive */
+        @media (max-width: 600px) {
+            .header h1 {
+                font-size: 20px;
+            }
+
+            .telegram-message {
+                padding: 12px;
+            }
+
+            .keyboard-btn {
+                font-size: 12px;
+                padding: 8px 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📱 Telegram Button Redesign</h1>
+            <p>Epic 9: Interactive Demo</p>
+        </div>
+
+        <!-- Default Menu State -->
+        <div class="demo-section">
+            <div class="section-title">State 1: Default Menu</div>
+
+            <div class="state-badge default">Default Menu</div>
+
+            <div class="telegram-message">
+                <div class="message-title">PostgreSQL 18 Released</div>
+                <a href="#" class="message-link">HN Discussion</a>
+
+                <div class="message-summary truncated">
+                    PostgreSQL 18 brings significant performance improvements to OLTP workloads with up to 2x throughput on high-connection counts. Key additions include native JSON path indexing, async I/O for vacuum, and improved logical replication. The release also features better query optimization and enhanced monitoring capabilities.
+                </div>
+
+                <a href="#" class="message-link">Read Article on postgresql.org</a>
+
+                <div class="message-stats">⬆️ 452 · 💬 230 · 1/8</div>
+
+                <div class="inline-keyboard">
+                    <div class="keyboard-row">
+                        <button class="keyboard-btn" onclick="showMore()">📖 More</button>
+                        <button class="keyboard-btn" onclick="showSaveAlert()">🔖 Save</button>
+                        <button class="keyboard-btn" onclick="switchToReactions()">⚡ Actions</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box">
+                ✓ Three-button compact row<br>
+                ✓ Summary is truncated (500 chars)<br>
+                ✓ Tap "📖 More" to expand<br>
+                ✓ Tap "⚡ Actions" for reactions
+            </div>
+        </div>
+
+        <!-- Reactions Menu State -->
+        <div class="demo-section" id="reactions-section" class="hidden">
+            <div class="section-title">State 2: Reactions Menu</div>
+
+            <div class="state-badge reactions">Reactions Menu</div>
+
+            <div id="reactions-alert" class="callback-alert hide">✓ Choose a reaction</div>
+
+            <div class="telegram-message">
+                <div class="message-title">PostgreSQL 18 Released</div>
+                <a href="#" class="message-link">HN Discussion</a>
+
+                <div class="message-summary truncated">
+                    PostgreSQL 18 brings significant performance improvements to OLTP workloads with up to 2x throughput on high-connection counts. Key additions include native JSON path indexing, async I/O for vacuum, and improved logical replication...
+                </div>
+
+                <a href="#" class="message-link">Read Article on postgresql.org</a>
+
+                <div class="message-stats">⬆️ 452 · 💬 230 · 1/8</div>
+
+                <div class="inline-keyboard">
+                    <div class="keyboard-row">
+                        <button class="keyboard-btn" onclick="showReactionAlert('👍 Good Response rated helpful — thanks!')">👍 Good Response</button>
+                        <button class="keyboard-btn" onclick="showReactionAlert('👎 Bad Response - Noted — thanks for the feedback!')">👎 Bad Response</button>
+                        <button class="keyboard-btn" onclick="backToDefault()">« Back</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box">
+                ✓ Menu swapped via keyboard edit<br>
+                ✓ Tap "👍 Good Response" to rate positively<br>
+                ✓ Tap "👎 Bad Response" to rate negatively<br>
+                ✓ Tap "« Back" to return to default menu
+            </div>
+        </div>
+
+        <!-- Expanded State -->
+        <div class="demo-section" id="expanded-section" class="hidden">
+            <div class="section-title">State 3: Summary Expanded</div>
+
+            <div class="state-badge expanded">Expanded Summary</div>
+
+            <div id="expanded-alert" class="callback-alert hide">📖 Full summary loaded</div>
+
+            <div class="telegram-message">
+                <div class="message-title">PostgreSQL 18 Released</div>
+                <a href="#" class="message-link">HN Discussion</a>
+
+                <div class="message-summary" id="expanded-text">
+                    PostgreSQL 18 brings significant performance improvements to OLTP workloads with up to 2x throughput on high-connection counts. Key additions include native JSON path indexing, async I/O for vacuum, and improved logical replication. The release also features better query optimization and enhanced monitoring capabilities for production environments.
+
+                    The async I/O for vacuum is particularly significant as it addresses a long-standing bottleneck in maintaining large tables. Users can now perform maintenance without blocking concurrent operations. JSON path indexing brings PostgreSQL closer to modern document-oriented databases while maintaining ACID guarantees.
+
+                    Performance benchmarks show the improvements are consistent across different hardware configurations. The new logical replication enhancements make it easier to build distributed PostgreSQL clusters.
+                </div>
+
+                <a href="#" class="message-link">Read Article on postgresql.org</a>
+
+                <div class="message-stats">⬆️ 452 · 💬 230 · 1/8</div>
+
+                <div class="inline-keyboard">
+                    <div class="keyboard-row">
+                        <button class="keyboard-btn" onclick="showSaveAlert()">🔖 Save</button>
+                        <button class="keyboard-btn" onclick="switchToReactionsFromExpanded()">⚡ Actions</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-box">
+                ✓ Full summary expanded (no truncation)<br>
+                ✓ "📖 More" button removed from keyboard<br>
+                ✓ Still can tap "⚡ Actions" for reactions<br>
+                ✓ Can still save the post
+            </div>
+        </div>
+
+        <!-- Comparison -->
+        <div class="demo-section">
+            <div class="section-title">Before vs After</div>
+
+            <div class="comparison">
+                <div class="comparison-row">
+                    <div class="comparison-cell header">Before (Current)</div>
+                    <div class="comparison-cell header">After (Epic 9)</div>
+                </div>
+                <div class="comparison-row">
+                    <div class="comparison-cell before">Row 1: [💬 Discuss] [👍] [👎]<br>Row 2: [🔖 Save for later]</div>
+                    <div class="comparison-cell after">Row 1: [📖 More] [🔖 Save] [⚡ Actions]<br><span style="font-size: 11px;">Reactions in menu</span></div>
+                </div>
+                <div class="comparison-row">
+                    <div class="comparison-cell before">Discuss button high visibility</div>
+                    <div class="comparison-cell after">Discuss removed (deferred to future)</div>
+                </div>
+                <div class="comparison-row">
+                    <div class="comparison-cell before">No inline expansion</div>
+                    <div class="comparison-cell after">Show More expands summary</div>
+                </div>
+                <div class="comparison-row">
+                    <div class="comparison-cell before">Two-row keyboard</div>
+                    <div class="comparison-cell after">Single-row + menu swap</div>
+                </div>
+                <div class="comparison-row">
+                    <div class="comparison-cell before">Emoji-only reactions</div>
+                    <div class="comparison-cell after">Explicit labels: Good/Bad</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Navigation -->
+        <div class="demo-section" style="text-align: center; background: #f9f9f9;">
+            <button class="keyboard-btn" onclick="resetDemo()" style="width: 100%;">↻ Reset to Default</button>
+        </div>
+    </div>
+
+    <script>
+        function showMore() {
+            document.getElementById('expanded-section').classList.remove('hidden');
+            document.getElementById('reactions-section').classList.add('hidden');
+            document.getElementById('expanded-alert').classList.remove('hide');
+            setTimeout(() => {
+                document.getElementById('expanded-alert').classList.add('hide');
+            }, 2000);
+        }
+
+        function switchToReactions() {
+            document.getElementById('reactions-section').classList.remove('hidden');
+            document.getElementById('expanded-section').classList.add('hidden');
+            document.getElementById('reactions-alert').classList.remove('hide');
+            setTimeout(() => {
+                document.getElementById('reactions-alert').classList.add('hide');
+            }, 2000);
+        }
+
+        function switchToReactionsFromExpanded() {
+            document.getElementById('reactions-section').classList.remove('hidden');
+            document.getElementById('expanded-section').classList.add('hidden');
+            document.getElementById('reactions-alert').classList.remove('hide');
+            setTimeout(() => {
+                document.getElementById('reactions-alert').classList.add('hide');
+            }, 2000);
+        }
+
+        function backToDefault() {
+            document.getElementById('reactions-section').classList.add('hidden');
+            document.getElementById('expanded-section').classList.add('hidden');
+            // Silent - no alert shown
+        }
+
+        function showSaveAlert() {
+            alert('🔖 Post saved for later reading!');
+        }
+
+        function showReactionAlert(message) {
+            alert(message);
+            // After reaction, swap back to default
+            setTimeout(() => {
+                backToDefault();
+            }, 100);
+        }
+
+        function resetDemo() {
+            document.getElementById('reactions-section').classList.add('hidden');
+            document.getElementById('expanded-section').classList.add('hidden');
+            document.getElementById('reactions-alert').classList.add('hide');
+            document.getElementById('expanded-alert').classList.add('hide');
+        }
+    </script>
+</body>
+</html>

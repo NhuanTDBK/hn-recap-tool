@@ -96,6 +96,68 @@ class DigestMessageFormatter:
 
         return message
 
+    def format_post_message_full(
+        self,
+        post: Post,
+        position: int,
+        total: int,
+    ) -> str:
+        """Format a single post with full untruncated summary (for "Show More" expansion).
+
+        Same structure as format_post_message() but without summary truncation.
+        Respects MAX_MESSAGE_LENGTH safety limit.
+
+        Args:
+            post: Post model
+            position: Position in digest (1-based)
+            total: Total posts in digest
+
+        Returns:
+            Formatted message text with full summary
+        """
+        message_parts = []
+
+        # Title (bold with Markdown)
+        title = post.title or "Untitled"
+        message_parts.append(f"*{self._escape_markdown(title)}*")
+
+        # HackerNews discussion link
+        if post.hn_id:
+            hn_link = f"https://news.ycombinator.com/item?id={post.hn_id}"
+            message_parts.append(f"[HN Discussion]({hn_link})")
+
+        # Full summary text (no truncation, but apply safety limit)
+        if post.summary:
+            summary = post.summary.strip()
+            # Apply safety limit (Telegram max 4096, leave buffer)
+            if len(summary) > 4000:
+                summary = summary[:4000] + "..."
+            message_parts.append(f"\n{summary}")
+
+        # External article link (if available)
+        if post.url:
+            # Escape special characters in URL for Markdown
+            safe_url = self._escape_url_for_markdown(post.url)
+            domain = self._extract_domain(post.url)
+            message_parts.append(f"\n[Read Article on {domain}]({safe_url})")
+
+        # Stats: Score, comments, and position
+        stats = f"\n⬆️ {post.score} · 💬 {post.comment_count} · {position}/{total}"
+        message_parts.append(stats)
+
+        # Combine all parts
+        message = "\n".join(message_parts)
+
+        # Ensure message doesn't exceed Telegram limit
+        if len(message) > self.MAX_MESSAGE_LENGTH:
+            logger.warning(
+                f"Full message too long for post {post.hn_id}, "
+                f"truncating ({len(message)} chars)"
+            )
+            message = message[: self.MAX_MESSAGE_LENGTH]
+
+        return message
+
     def format_batch_header(self, total_posts: int) -> str:
         """Format header message for digest batch.
 
@@ -196,11 +258,10 @@ class InlineKeyboardBuilder:
     """Builds inline keyboard buttons for Telegram messages."""
 
     def build_post_keyboard(self, post_id: str) -> Dict[str, Any]:
-        """Build inline keyboard for a post message.
+        """Build inline keyboard for a post message (default menu).
 
-        Returns button structure for:
-        - Row 1: Discuss button (💬) and reaction buttons (👍 👎)
-        - Row 2: Save for later button (🔖)
+        Returns single-row button structure:
+        - [ 📖 More ] [ 🔖 Save ] [ ⚡ Actions ]
 
         Args:
             post_id: Post ID (UUID string)
@@ -210,26 +271,87 @@ class InlineKeyboardBuilder:
         """
         buttons = {
             "inline_keyboard": [
-                # Row 1: Discuss and reaction buttons
+                # Default menu: Show More, Save, Actions
                 [
                     {
-                        "text": "💬 Discuss",
-                        "callback_data": f"discuss_{post_id}",
+                        "text": "📖 More",
+                        "callback_data": f"show_more_{post_id}",
                     },
                     {
-                        "text": "👍",
+                        "text": "🔖 Save",
+                        "callback_data": f"save_post_{post_id}",
+                    },
+                    {
+                        "text": "⚡ Actions",
+                        "callback_data": f"actions_{post_id}",
+                    },
+                ],
+            ]
+        }
+
+        return buttons
+
+    def build_post_keyboard_without_more(self, post_id: str) -> Dict[str, Any]:
+        """Build inline keyboard after summary has been expanded.
+
+        Returns two-button layout (without Show More):
+        - [ 🔖 Save ] [ ⚡ Actions ]
+
+        Used when user has already tapped "More" and summary is expanded.
+
+        Args:
+            post_id: Post ID (UUID string)
+
+        Returns:
+            Keyboard dict for aiogram InlineKeyboardMarkup
+        """
+        buttons = {
+            "inline_keyboard": [
+                # After expansion: Save and Actions only
+                [
+                    {
+                        "text": "🔖 Save",
+                        "callback_data": f"save_post_{post_id}",
+                    },
+                    {
+                        "text": "⚡ Actions",
+                        "callback_data": f"actions_{post_id}",
+                    },
+                ],
+            ]
+        }
+
+        return buttons
+
+    def build_reactions_keyboard(self, post_id: str) -> Dict[str, Any]:
+        """Build inline keyboard for reactions menu.
+
+        Returns three-button layout:
+        - [ 👍 Good Response ] [ 👎 Bad Response ] [ « Back ]
+
+        Used when user taps "Actions" to show reactions and back button.
+
+        Args:
+            post_id: Post ID (UUID string)
+
+        Returns:
+            Keyboard dict for aiogram InlineKeyboardMarkup
+        """
+        buttons = {
+            "inline_keyboard": [
+                # Reactions menu
+                [
+                    {
+                        "text": "👍 Good Response",
                         "callback_data": f"react_up_{post_id}",
                     },
                     {
-                        "text": "👎",
+                        "text": "👎 Bad Response",
                         "callback_data": f"react_down_{post_id}",
                     },
-                ],
-                # Row 2: Save for later button
-                [
                     {
-                        "text": "🔖 Save for later",
-                        "callback_data": f"save_post_{post_id}",
+                        "text": "« Back",
+                        "callback_data": f"back_{post_id}",
                     },
                 ],
             ]
