@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from sqlalchemy import and_, select
@@ -349,8 +350,11 @@ async def handle_show_more(callback: CallbackQuery, session: AsyncSession):
 
         # Update message with expanded summary and new keyboard
         try:
-            await callback.message.edit_message_text(text=full_text)
-            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            await callback.message.edit_text(
+                text=full_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
             logger.info(f"Expanded message for post {post_id}")
         except Exception as edit_error:
             logger.warning(f"Failed to edit message: {edit_error}")
