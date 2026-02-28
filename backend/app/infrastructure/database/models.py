@@ -101,7 +101,7 @@ class User(Base):
     agent_calls = relationship("AgentCall", back_populates="user", cascade="all, delete-orphan")
     deliveries = relationship("Delivery", back_populates="user", cascade="all, delete-orphan")
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
-    activity_log = relationship("UserActivityLog", cascade="all, delete-orphan")
+    activity_log = relationship("UserActivityLog", back_populates="user", cascade="all, delete-orphan")
 
     def get_summary_style(self) -> str:
         """Get the user's preferred summary style."""
@@ -317,7 +317,7 @@ class UserActivityLog(Base):
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
 
     # Relationships
-    user = relationship("User")
+    user = relationship("User", back_populates="activity_log")
     post = relationship("Post")
 
     def __repr__(self):
