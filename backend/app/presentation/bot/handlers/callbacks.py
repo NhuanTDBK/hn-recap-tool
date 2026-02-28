@@ -296,6 +296,22 @@ async def handle_save_post(callback: CallbackQuery, session: AsyncSession):
 
         await callback.answer("🔖 Post saved for later reading!", show_alert=False)
 
+        # Update button text to "✅ Saved"
+        try:
+            has_more = any(
+                btn.callback_data.startswith("show_more_")
+                for row in callback.message.reply_markup.inline_keyboard
+                for btn in row
+            )
+            builder = InlineKeyboardBuilder()
+            if has_more:
+                saved_keyboard = builder.build_post_keyboard_saved(post_id)
+            else:
+                saved_keyboard = builder.build_post_keyboard_without_more_saved(post_id)
+            await callback.message.edit_reply_markup(reply_markup=saved_keyboard)
+        except Exception as edit_error:
+            logger.warning(f"Failed to update Save button label: {edit_error}")
+
     except Exception as e:
         logger.error(f"Error saving post: {e}", exc_info=True)
         await callback.answer("🔖 Save noted!", show_alert=False)

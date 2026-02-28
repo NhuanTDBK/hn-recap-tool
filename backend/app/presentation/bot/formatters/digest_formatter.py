@@ -323,6 +323,68 @@ class InlineKeyboardBuilder:
 
         return buttons
 
+    def build_post_keyboard_saved(self, post_id: str) -> Dict[str, Any]:
+        """Build inline keyboard for a post message after Save has been tapped.
+
+        Returns single-row button structure:
+        - [ 📖 More ] [ ✅ Saved ] [ ⚡ Actions ]
+
+        Args:
+            post_id: Post ID (UUID string)
+
+        Returns:
+            Keyboard dict for aiogram InlineKeyboardMarkup
+        """
+        buttons = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "📖 More",
+                        "callback_data": f"show_more_{post_id}",
+                    },
+                    {
+                        "text": "✅ Saved",
+                        "callback_data": f"save_post_{post_id}",
+                    },
+                    {
+                        "text": "⚡ Actions",
+                        "callback_data": f"actions_{post_id}",
+                    },
+                ],
+            ]
+        }
+
+        return buttons
+
+    def build_post_keyboard_without_more_saved(self, post_id: str) -> Dict[str, Any]:
+        """Build inline keyboard after summary expanded and Save has been tapped.
+
+        Returns two-button layout:
+        - [ ✅ Saved ] [ ⚡ Actions ]
+
+        Args:
+            post_id: Post ID (UUID string)
+
+        Returns:
+            Keyboard dict for aiogram InlineKeyboardMarkup
+        """
+        buttons = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Saved",
+                        "callback_data": f"save_post_{post_id}",
+                    },
+                    {
+                        "text": "⚡ Actions",
+                        "callback_data": f"actions_{post_id}",
+                    },
+                ],
+            ]
+        }
+
+        return buttons
+
     def build_reactions_keyboard(self, post_id: str) -> Dict[str, Any]:
         """Build inline keyboard for reactions menu.
 
