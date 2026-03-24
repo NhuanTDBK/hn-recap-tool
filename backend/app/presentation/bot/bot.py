@@ -119,18 +119,23 @@ class BotManager:
             settings,
         )
 
+        routers = [
+            commands.router,
+            settings.router,
+            callbacks.callback_router,
+            discussion.router,
+        ]
+
+        # Detach routers from any previous dispatcher so they can be reused
+        # when initialize() is called more than once (e.g. scheduler cycles).
+        for r in routers:
+            if r.parent_router is not None:
+                r.parent_router.sub_routers.remove(r)
+                r._parent_router = None  # noqa: SLF001
+
         # Register routers in order of priority
-        # 1. Commands (highest priority)
-        self._dp.include_router(commands.router)
-
-        # 2. Settings callbacks (inline buttons for settings)
-        self._dp.include_router(settings.router)
-
-        # 3. Callbacks (inline buttons)
-        self._dp.include_router(callbacks.callback_router)
-
-        # 4. Discussion messages (lowest priority, state-filtered)
-        self._dp.include_router(discussion.router)
+        for r in routers:
+            self._dp.include_router(r)
 
         logger.info("Handlers registered: commands, settings, callbacks, discussion")
 
