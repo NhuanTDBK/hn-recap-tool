@@ -23,7 +23,7 @@ services:
     volumes:
       - rocksdb_data:${APP_DATA_DIR:-/app/data}
     restart: ${RESTART_POLICY:-unless-stopped}
-    mem_limit: ${SCHEDULER_MEM_LIMIT:-512m}
+    mem_limit: ${SCHEDULER_MEM_LIMIT:-2048m}
 
   # --- Supporting services ---
 
