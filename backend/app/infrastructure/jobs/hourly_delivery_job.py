@@ -60,6 +60,7 @@ class HourlyDeliveryJob:
             "users_with_posts": 0,
             "users_delivered": 0,
             "users_skipped": 0,
+            "users_failed": 0,
             "total_messages_sent": 0,
             "total_failures": 0,
             "errors": 0,
@@ -193,6 +194,7 @@ class HourlyDeliveryJob:
             "users_with_posts": 0,
             "users_delivered": 0,
             "users_skipped": 0,
+            "users_failed": 0,
             "total_messages_sent": 0,
             "total_failures": 0,
             "errors": 0,
@@ -243,29 +245,55 @@ class HourlyDeliveryJob:
                             f"Delivered {result['messages_sent']} messages to user {user.id}"
                         )
                     else:
-                        self.stats["users_skipped"] += 1
-                        logger.warning(f"No messages sent to user {user.id}")
+                        # Every message failed. This is a delivery failure, not a
+                        # skip — skips mean "nothing new to send". Conflating the
+                        # two is how a total outage stayed silent for months.
+                        self.stats["users_failed"] += 1
+                        logger.error(
+                            f"Delivery FAILED for user {user.id}: all "
+                            f"{len(posts)} messages rejected. "
+                            f"First reason: {result['failures'][0].get('reason') if result['failures'] else 'unknown'}"
+                        )
 
-                    # Update last_delivered_at timestamp
-                    try:
-                        user.last_delivered_at = datetime.now(timezone.utc)
-                        self.db_session.add(user)
-                        await self.db_session.commit()
-                    except Exception as e:
-                        logger.warning(f"Failed to update last_delivered_at for user {user.id}: {e}")
+                    # Update last_delivered_at only when something actually sent,
+                    # so the timestamp stays a true record of last contact.
+                    if result["messages_sent"] > 0:
+                        try:
+                            user.last_delivered_at = datetime.now(timezone.utc)
+                            self.db_session.add(user)
+                            await self.db_session.commit()
+                        except Exception as e:
+                            logger.warning(f"Failed to update last_delivered_at for user {user.id}: {e}")
 
                 except Exception as e:
                     logger.error(f"Error processing user {user.id}: {e}")
                     self.stats["errors"] += 1
                     continue
 
-            logger.info(
+            summary = (
                 f"Hourly delivery complete: "
                 f"delivered={self.stats['users_delivered']}, "
                 f"skipped={self.stats['users_skipped']}, "
+                f"failed={self.stats['users_failed']}, "
                 f"messages={self.stats['total_messages_sent']}, "
                 f"failures={self.stats['total_failures']}"
             )
+
+            # Surface delivery failures loudly. A run that had posts to send but
+            # sent nothing is an outage, not a quiet no-op.
+            if self.stats["users_failed"] or self.stats["total_failures"]:
+                logger.error(summary)
+                if (
+                    self.stats["users_with_posts"]
+                    and not self.stats["total_messages_sent"]
+                ):
+                    logger.error(
+                        "DELIVERY OUTAGE: %d user(s) had posts ready but zero "
+                        "messages were sent — every send was rejected.",
+                        self.stats["users_with_posts"],
+                    )
+            else:
+                logger.info(summary)
 
             return self.stats
 

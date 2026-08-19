@@ -7,6 +7,7 @@ Formats HN posts as Style 2 (Flat Scroll) messages per spec:
 - Reaction buttons (👍 👎)
 """
 
+import html
 import logging
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
@@ -58,26 +59,27 @@ class DigestMessageFormatter:
         """
         message_parts = []
 
-        # Title (bold with Markdown)
+        # Title (bold with HTML)
         title = post.title or "Untitled"
-        message_parts.append(f"*{self._escape_markdown(title)}*")
+        message_parts.append(f"<b>{self._escape_html(title)}</b>")
 
         # HackerNews discussion link
         if post.hn_id:
             hn_link = f"https://news.ycombinator.com/item?id={post.hn_id}"
-            message_parts.append(f"[HN Discussion]({hn_link})")
+            message_parts.append(f'<a href="{hn_link}">HN Discussion</a>')
 
-        # Summary text
+        # Summary text (escaped — AI summaries often quote raw HTML/code)
         summary = self._format_summary(post.summary)
         if summary:
-            message_parts.append(f"\n{summary}")
+            message_parts.append(f"\n{self._escape_html(summary)}")
 
         # External article link (if available)
         if post.url:
-            # Escape special characters in URL for Markdown
-            safe_url = self._escape_url_for_markdown(post.url)
-            domain = self._extract_domain(post.url)
-            message_parts.append(f"\n[Read Article on {domain}]({safe_url})")
+            safe_url = self._escape_url_for_html(post.url)
+            domain = self._escape_html(self._extract_domain(post.url))
+            message_parts.append(
+                f'\n<a href="{safe_url}">Read Article on {domain}</a>'
+            )
 
         # Stats: Score, comments, and position
         stats = f"\n⬆️ {post.score} · 💬 {post.comment_count} · {position}/{total}"
@@ -87,12 +89,7 @@ class DigestMessageFormatter:
         message = "\n".join(message_parts)
 
         # Ensure message doesn't exceed Telegram limit
-        if len(message) > self.MAX_MESSAGE_LENGTH:
-            logger.warning(
-                f"Message too long for post {post.hn_id}, "
-                f"truncating ({len(message)} chars)"
-            )
-            message = message[: self.MAX_MESSAGE_LENGTH]
+        message = self._truncate_to_limit(message, post.hn_id)
 
         return message
 
@@ -117,14 +114,14 @@ class DigestMessageFormatter:
         """
         message_parts = []
 
-        # Title (bold with Markdown)
+        # Title (bold with HTML)
         title = post.title or "Untitled"
-        message_parts.append(f"*{self._escape_markdown(title)}*")
+        message_parts.append(f"<b>{self._escape_html(title)}</b>")
 
         # HackerNews discussion link
         if post.hn_id:
             hn_link = f"https://news.ycombinator.com/item?id={post.hn_id}"
-            message_parts.append(f"[HN Discussion]({hn_link})")
+            message_parts.append(f'<a href="{hn_link}">HN Discussion</a>')
 
         # Full summary text (no truncation, but apply safety limit)
         if post.summary:
@@ -132,14 +129,16 @@ class DigestMessageFormatter:
             # Apply safety limit (Telegram max 4096, leave buffer)
             if len(summary) > 4000:
                 summary = summary[:4000] + "..."
-            message_parts.append(f"\n{summary}")
+            # Escape after truncating so entities are never split
+            message_parts.append(f"\n{self._escape_html(summary)}")
 
         # External article link (if available)
         if post.url:
-            # Escape special characters in URL for Markdown
-            safe_url = self._escape_url_for_markdown(post.url)
-            domain = self._extract_domain(post.url)
-            message_parts.append(f"\n[Read Article on {domain}]({safe_url})")
+            safe_url = self._escape_url_for_html(post.url)
+            domain = self._escape_html(self._extract_domain(post.url))
+            message_parts.append(
+                f'\n<a href="{safe_url}">Read Article on {domain}</a>'
+            )
 
         # Stats: Score, comments, and position
         stats = f"\n⬆️ {post.score} · 💬 {post.comment_count} · {position}/{total}"
@@ -149,12 +148,7 @@ class DigestMessageFormatter:
         message = "\n".join(message_parts)
 
         # Ensure message doesn't exceed Telegram limit
-        if len(message) > self.MAX_MESSAGE_LENGTH:
-            logger.warning(
-                f"Full message too long for post {post.hn_id}, "
-                f"truncating ({len(message)} chars)"
-            )
-            message = message[: self.MAX_MESSAGE_LENGTH]
+        message = self._truncate_to_limit(message, post.hn_id)
 
         return message
 
@@ -172,6 +166,44 @@ class DigestMessageFormatter:
             f"Scroll through each post. "
             f"Tap Discuss to start a conversation."
         )
+
+    def _truncate_to_limit(self, message: str, hn_id: Optional[int] = None) -> str:
+        """Truncate a message to Telegram's limit without splitting HTML markup.
+
+        A naive slice can land inside a tag ("<b") or an entity ("&lt"), which
+        makes Telegram reject the message with "can't parse entities" — the very
+        failure this formatter exists to avoid. Since truncation only ever cuts
+        the trailing stats line (summaries are already bounded), it is safe to
+        back off to the last character that leaves markup intact.
+
+        Args:
+            message: Fully formatted message
+            hn_id: Post's HN ID, for logging
+
+        Returns:
+            Message no longer than MAX_MESSAGE_LENGTH
+        """
+        if len(message) <= self.MAX_MESSAGE_LENGTH:
+            return message
+
+        logger.warning(
+            f"Message too long for post {hn_id}, "
+            f"truncating ({len(message)} chars)"
+        )
+
+        truncated = message[: self.MAX_MESSAGE_LENGTH]
+
+        # Back off past an unterminated tag or entity introduced by the cut.
+        for opener, closer in (("<", ">"), ("&", ";")):
+            start = truncated.rfind(opener)
+            if start != -1 and truncated.find(closer, start) == -1:
+                truncated = truncated[:start]
+
+        # Close the title's bold tag if the cut landed inside it.
+        if truncated.count("<b>") > truncated.count("</b>"):
+            truncated += "</b>"
+
+        return truncated
 
     def _extract_domain(self, url: str) -> str:
         """Extract domain from URL.
@@ -214,44 +246,39 @@ class DigestMessageFormatter:
 
         return summary
 
-    def _escape_markdown(self, text: str) -> str:
-        """Escape Markdown special characters in text.
+    def _escape_html(self, text: str) -> str:
+        """Escape HTML special characters in text.
 
-        Telegram uses Markdown for formatting, so we need to escape:
-        * (asterisk), _ (underscore), [ (bracket), ] (bracket), ( (paren), ) (paren)
+        The bot sends messages with ParseMode.HTML, so any literal <, > or &
+        in post titles or summaries must be escaped or Telegram rejects the
+        whole message with "can't parse entities". AI summaries of HN posts
+        routinely quote code containing tags like <div> or <script>.
 
         Args:
             text: Text to escape
 
         Returns:
-            Escaped text safe for Markdown
+            Escaped text safe for Telegram's HTML parse mode
         """
         if not text:
             return ""
 
-        # Escape special Markdown characters
-        escape_chars = ['*', '_', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-        for char in escape_chars:
-            text = text.replace(char, f'\\{char}')
+        # quote=False: we only interpolate into text nodes, never attributes
+        return html.escape(text, quote=False)
 
-        return text
-
-    def _escape_url_for_markdown(self, url: str) -> str:
-        """Escape URL for Markdown link format.
-
-        Only escape ')' in URLs as other characters are allowed.
+    def _escape_url_for_html(self, url: str) -> str:
+        """Escape a URL for use in an HTML href attribute.
 
         Args:
             url: URL to escape
 
         Returns:
-            Escaped URL
+            Escaped URL safe for an href attribute
         """
         if not url:
             return ""
 
-        # Only escape closing parenthesis in URLs
-        return url.replace(')', '\\)')
+        return html.escape(url, quote=True)
 
 
 class InlineKeyboardBuilder:

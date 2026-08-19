@@ -87,8 +87,20 @@ async def pipeline() -> None:
     # Step 4: Deliver
     logger.info("[4/4] Delivering summaries...")
     try:
-        await deliver()
-        logger.info("[4/4] Delivery complete")
+        stats = await deliver()
+        # deliver() returns None only on the early-exit paths; treat a run that
+        # sent nothing while posts were queued as a failure, not a success.
+        if isinstance(stats, dict) and (
+            stats.get("users_failed") or stats.get("total_failures")
+        ):
+            logger.error(
+                "[4/4] Delivery FAILED: sent=%s, failures=%s, users_failed=%s",
+                stats.get("total_messages_sent", 0),
+                stats.get("total_failures", 0),
+                stats.get("users_failed", 0),
+            )
+        else:
+            logger.info("[4/4] Delivery complete")
     except Exception:
         logger.exception("[4/4] Delivery failed")
 
