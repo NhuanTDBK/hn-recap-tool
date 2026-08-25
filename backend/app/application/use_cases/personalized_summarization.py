@@ -628,9 +628,9 @@ async def summarize_for_users_in_group(
             output_tokens = sum(r.usage.output_tokens for r in run_result.raw_responses)
             actual_tokens = input_tokens + output_tokens
 
-            # Calculate cost (gpt-4o-mini rates)
-            input_cost = input_tokens * 0.15 / 1_000_000
-            output_cost = output_tokens * 0.60 / 1_000_000
+            # Calculate cost (gemini-3.6-flash introductory rates, through 2026-12-31)
+            input_cost = input_tokens * 0.75 / 1_000_000
+            output_cost = output_tokens * 3.75 / 1_000_000
             cost_per_summary = Decimal(str(input_cost + output_cost))
 
             # Distribute summary to users in group who need it
