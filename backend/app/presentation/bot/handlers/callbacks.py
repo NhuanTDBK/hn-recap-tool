@@ -6,6 +6,7 @@ Implements full functionality for all buttons.
 
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 from uuid import UUID
 
 from aiogram import F, Router
@@ -16,10 +17,11 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.interfaces import ActivityLogRepository
-from app.infrastructure.database.models import Delivery, Post, User
+from app.infrastructure.database.models import Delivery, Post, Summary, User
 from app.infrastructure.repositories.postgres.activity_log_repo import (
     PostgresActivityLogRepository,
 )
+from app.infrastructure.services.group_subscriber import is_group_chat
 from app.presentation.bot.states import BotStates
 from app.presentation.bot.formatters.digest_formatter import DigestMessageFormatter, InlineKeyboardBuilder
 
@@ -27,6 +29,18 @@ logger = logging.getLogger(__name__)
 
 # Create router for callbacks
 callback_router = Router()
+
+
+async def _resolve_feed_user(session: AsyncSession, callback: CallbackQuery) -> Optional[User]:
+    """Return the User a button press belongs to.
+
+    In the group topic, buttons act on the group's feed row (the chat), so members
+    who never ran /start can still react. Elsewhere, it is the person who pressed.
+    """
+    chat_id = callback.message.chat.id if callback.message else None
+    telegram_id = chat_id if is_group_chat(chat_id) else callback.from_user.id
+    result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+    return result.scalar_one_or_none()
 
 
 @callback_router.callback_query(F.data.startswith("discuss_"))
@@ -111,10 +125,8 @@ async def handle_react_up(callback: CallbackQuery, session: AsyncSession):
     logger.info(f"Upvote button pressed by user {telegram_id} for post {post_id}")
 
     try:
-        # Find user
-        stmt = select(User).where(User.telegram_id == telegram_id)
-        result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
+        # Find user (in the group topic this is the group's feed row)
+        user = await _resolve_feed_user(session, callback)
 
         if not user:
             await callback.answer("❌ User not found.", show_alert=True)
@@ -186,10 +198,8 @@ async def handle_react_down(callback: CallbackQuery, session: AsyncSession):
     logger.info(f"Downvote button pressed by user {telegram_id} for post {post_id}")
 
     try:
-        # Find user
-        stmt = select(User).where(User.telegram_id == telegram_id)
-        result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
+        # Find user (in the group topic this is the group's feed row)
+        user = await _resolve_feed_user(session, callback)
 
         if not user:
             await callback.answer("❌ User not found.", show_alert=True)
@@ -276,10 +286,8 @@ async def handle_save_post(callback: CallbackQuery, session: AsyncSession):
     logger.info(f"Save button pressed by user {telegram_id} for post {post_id}")
 
     try:
-        # Find user
-        stmt = select(User).where(User.telegram_id == telegram_id)
-        result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
+        # Find user (in the group topic this is the group's feed row)
+        user = await _resolve_feed_user(session, callback)
 
         if not user:
             await callback.answer("❌ User not found.", show_alert=True)
@@ -336,10 +344,8 @@ async def handle_show_more(callback: CallbackQuery, session: AsyncSession):
     logger.info(f"Show More button pressed by user {telegram_id} for post {post_id}")
 
     try:
-        # Find user
-        stmt = select(User).where(User.telegram_id == telegram_id)
-        result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
+        # Find user (in the group topic this is the group's feed row)
+        user = await _resolve_feed_user(session, callback)
 
         if not user:
             await callback.answer("❌ User not found.", show_alert=True)
@@ -354,11 +360,21 @@ async def handle_show_more(callback: CallbackQuery, session: AsyncSession):
             await callback.answer("❌ Post not found.", show_alert=True)
             return
 
+        # Use the summary written for this feed (DM user or group). posts.summary is shared
+        # and holds whichever feed was delivered last.
+        stmt = (
+            select(Summary.summary_text)
+            .where(and_(Summary.user_id == user.id, Summary.post_id == post.id))
+            .order_by(Summary.created_at.desc())
+            .limit(1)
+        )
+        summary_text = (await session.execute(stmt)).scalar_one_or_none()
+
         # Format the full message with untruncated summary
         formatter = DigestMessageFormatter()
         # We need position and total for formatting, but we can infer from message or use defaults
         # For now, use reasonable defaults (1/1 since we're just showing the post)
-        full_text = formatter.format_post_message_full(post, position=1, total=1)
+        full_text = formatter.format_post_message_full(post, position=1, total=1, summary=summary_text)
 
         # Build keyboard without "More" button
         builder = InlineKeyboardBuilder()
@@ -369,7 +385,7 @@ async def handle_show_more(callback: CallbackQuery, session: AsyncSession):
             await callback.message.edit_text(
                 text=full_text,
                 reply_markup=keyboard,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.HTML,  # the formatter emits HTML, same as delivery
             )
             logger.info(f"Expanded message for post {post_id}")
         except Exception as edit_error:

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.agents.base_agent import BaseAgent
 from app.infrastructure.database.models import Post, Summary, User
+from app.infrastructure.services.group_subscriber import is_feed_enabled
 from app.infrastructure.storage.rocksdb_store import RocksDBContentStore
 
 logger = logging.getLogger(__name__)
@@ -516,7 +517,8 @@ async def group_users_by_delivery_style(
         stmt = stmt.where(User.id.in_(user_ids))
 
     result = await session.execute(stmt)
-    users = list(result.scalars().all())
+    # Skip DM users when DM delivery is turned off (the group feed is always kept)
+    users = [u for u in result.scalars().all() if is_feed_enabled(u)]
 
     # Group by prompt_type (from summary_preferences.style)
     groups: dict[str, list[User]] = {}

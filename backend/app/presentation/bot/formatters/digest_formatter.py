@@ -12,6 +12,7 @@ import logging
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
+from app.infrastructure.config.settings import settings
 from app.infrastructure.database.models import Post
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ class DigestMessageFormatter:
 
     def __init__(self):
         """Initialize formatter."""
-        pass
+        self.full_summary_max_length = settings.telegram_full_summary_max_length
 
     def format_post_message(
         self,
@@ -98,6 +99,7 @@ class DigestMessageFormatter:
         post: Post,
         position: int,
         total: int,
+        summary: Optional[str] = None,
     ) -> str:
         """Format a single post with full untruncated summary (for "Show More" expansion).
 
@@ -108,10 +110,12 @@ class DigestMessageFormatter:
             post: Post model
             position: Position in digest (1-based)
             total: Total posts in digest
+            summary: Summary text to show; defaults to post.summary
 
         Returns:
             Formatted message text with full summary
         """
+        summary_text = summary if summary is not None else post.summary
         message_parts = []
 
         # Title (bold with HTML)
@@ -124,11 +128,11 @@ class DigestMessageFormatter:
             message_parts.append(f'<a href="{hn_link}">HN Discussion</a>')
 
         # Full summary text (no truncation, but apply safety limit)
-        if post.summary:
-            summary = post.summary.strip()
+        if summary_text:
+            summary = summary_text.strip()
             # Apply safety limit (Telegram max 4096, leave buffer)
-            if len(summary) > 4000:
-                summary = summary[:4000] + "..."
+            if len(summary) > self.full_summary_max_length:
+                summary = summary[: self.full_summary_max_length] + "..."
             # Escape after truncating so entities are never split
             message_parts.append(f"\n{self._escape_html(summary)}")
 

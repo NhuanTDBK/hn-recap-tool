@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Column, Date, ForeignKey, Integer, JSON, Numeric, String, Text, TIMESTAMP
+from sqlalchemy import BigInteger, Boolean, Column, Date, ForeignKey, Integer, JSON, Numeric, String, Text, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -74,7 +74,7 @@ class User(Base):
     id = Column(Integer, primary_key=True)
 
     # Telegram identity
-    telegram_id = Column(Integer, unique=True, nullable=False, index=True)
+    telegram_id = Column(BigInteger, unique=True, nullable=False, index=True)
     username = Column(String(255))
 
     # User preferences

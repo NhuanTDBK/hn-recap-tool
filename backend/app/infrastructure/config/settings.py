@@ -69,6 +69,15 @@ class Settings(BaseSettings):
     # Telegram Bot
     telegram_bot_token: Optional[str] = None
 
+    # Telegram group feed: the group is delivered to like a subscriber
+    telegram_group_chat_id: Optional[int] = None  # e.g. -1001234567890
+    telegram_group_topic_id: Optional[int] = None  # forum topic (message_thread_id); unset = General
+    telegram_group_summary_style: str = "basic"
+    telegram_dm_delivery_enabled: bool = True  # False = only the group feed gets summaries and pushes
+
+    # Telegram message formatting
+    telegram_full_summary_max_length: int = 4000  # Show More cap; under Telegram's 4096 to leave room for title/links
+
     # CORS
     cors_origins: list[str] = ["http://localhost:3000"]
 

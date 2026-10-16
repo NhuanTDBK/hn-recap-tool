@@ -53,6 +53,7 @@ from app.application.use_cases.personalized_summarization import (
     run_personalized_summarization,
 )
 from app.infrastructure.config.settings import settings
+from app.infrastructure.services.group_subscriber import ensure_group_subscriber
 from app.infrastructure.storage.rocksdb_store import RocksDBContentStore
 
 # Configure logging
@@ -102,6 +103,10 @@ async def main_async(
 
     async with async_session_factory() as session:
         try:
+            # Make sure the group feed (if configured) exists so it is summarized this run
+            if not dry_run:
+                await ensure_group_subscriber(session)
+
             # Initialize RocksDB
             content_store = RocksDBContentStore(
                 db_path=str(Path(settings.data_dir) / "content.rocksdb"), read_only=True

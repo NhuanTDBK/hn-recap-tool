@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import socket
+from typing import Optional
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -213,6 +214,7 @@ class BotManager:
         text: str,
         reply_markup=None,
         parse_mode=None,
+        message_thread_id: Optional[int] = None,
     ) -> dict:
         """Send a message to a user.
 
@@ -221,6 +223,7 @@ class BotManager:
             text: Message text
             reply_markup: Inline keyboard markup
             parse_mode: Parse mode (HTML, Markdown)
+            message_thread_id: Forum topic ID when sending into a group topic
 
         Returns:
             Message dict with message_id
@@ -238,6 +241,7 @@ class BotManager:
                     text=text,
                     reply_markup=reply_markup,
                     parse_mode=parse_mode or self.config.parse_mode,
+                    message_thread_id=message_thread_id,
                 )
 
                 logger.debug(f"Sent message to {chat_id}: msg_id={message.message_id}")

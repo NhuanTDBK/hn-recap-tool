@@ -26,6 +26,7 @@ from app.infrastructure.database.models import Delivery, Post, Summary, User
 from app.infrastructure.repositories.postgres.delivery_repo import (
     PostgresDeliveryRepository,
 )
+from app.infrastructure.services.group_subscriber import is_feed_enabled
 from app.presentation.bot.bot import get_bot_manager
 from app.presentation.bot.handlers.delivery import DigestDeliveryHandler
 
@@ -76,7 +77,8 @@ class HourlyDeliveryJob:
         try:
             stmt = select(User).where(User.status == "active")
             result = await self.db_session.execute(stmt)
-            users = list(result.scalars().all())
+            # Skip DM users when DM delivery is turned off (the group feed is always kept)
+            users = [u for u in result.scalars().all() if is_feed_enabled(u)]
             self.stats["active_users"] = len(users)
             logger.info(f"Found {len(users)} active users")
             return users

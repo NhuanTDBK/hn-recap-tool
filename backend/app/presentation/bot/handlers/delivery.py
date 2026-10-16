@@ -12,6 +12,7 @@ from app.infrastructure.database.models import Post, User
 from app.infrastructure.repositories.postgres.delivery_repo import (
     PostgresDeliveryRepository,
 )
+from app.infrastructure.services.group_subscriber import topic_id_for
 from app.presentation.bot.bot import get_bot_manager
 from app.presentation.bot.formatters.digest_formatter import (
     DigestMessageFormatter,
@@ -115,6 +116,7 @@ class DigestDeliveryHandler:
                     chat_id=user.telegram_id,
                     text=message_text,
                     reply_markup=keyboard_markup,
+                    message_thread_id=topic_id_for(user.telegram_id),
                 )
 
                 message_id = message_result["message_id"]

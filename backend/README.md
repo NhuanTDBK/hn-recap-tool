@@ -126,6 +126,18 @@ python scripts/run_bot.py
 python scripts/run_delivery_pipeline.py
 ```
 
+### Group Topic Feed
+
+The digest can also be posted into one topic of a Telegram forum group. The group is stored as its own row in `users` (with `telegram_id` set to the group chat ID), so it gets its own summaries and delivery tracking.
+
+1. Add `@HNDigestBot` to the group and let it post in the target topic.
+2. In that topic, copy a message link: `https://t.me/c/<A>/<TOPIC>/<MSG>`.
+3. Set `TELEGRAM_GROUP_CHAT_ID=-100<A>` and `TELEGRAM_GROUP_TOPIC_ID=<TOPIC>` in `.env`. Optionally set `TELEGRAM_GROUP_SUMMARY_STYLE` (default `basic`).
+
+The row is created on the next summarization run. To stop DM summaries and pushes and keep only the group feed, set `TELEGRAM_DM_DELIVERY_ENABLED=false`. Bot commands in DMs keep working.
+
+In the group, the buttons act on the group's feed, so members do not need to run `/start`. Because the bot runs in privacy mode, a Discuss follow-up must be a **reply** to the bot's message.
+
 ## Architecture
 
 ```
