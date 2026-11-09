@@ -75,6 +75,18 @@ class Settings(BaseSettings):
     telegram_group_summary_style: str = "basic"
     telegram_dm_delivery_enabled: bool = True  # False = only the group feed gets summaries and pushes
 
+    # Daily recommendations: picks learned from the group's saves, sent to their own forum topic
+    recommendation_enabled: bool = False  # registers the daily job in run_scheduler.py
+    telegram_recommendation_topic_id: Optional[int] = None  # forum topic for the picks
+    recommendation_daily_max: int = 20  # hard ceiling per day, not a target
+    recommendation_min_fit: int = 4  # the model rates each pick 1-5; lower scores are dropped
+    recommendation_hour: int = 8
+    recommendation_minute: int = 30
+    recommendation_timezone: str = "Asia/Ho_Chi_Minh"
+    recommendation_min_saves: int = 5  # fewer saves than this: skip, there is no taste to learn
+    recommendation_lookback_hours: int = 36  # candidate window, wider than a day to survive a missed run
+    recommendation_ignored_days: int = 14  # how far back unreacted picks count as a weak negative
+
     # Telegram message formatting
     telegram_full_summary_max_length: int = 4000  # Show More cap; under Telegram's 4096 to leave room for title/links
 

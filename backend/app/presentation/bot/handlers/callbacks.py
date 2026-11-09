@@ -21,6 +21,9 @@ from app.infrastructure.database.models import Delivery, Post, Summary, User
 from app.infrastructure.repositories.postgres.activity_log_repo import (
     PostgresActivityLogRepository,
 )
+from app.infrastructure.repositories.postgres.recommendation_repo import (
+    PostgresRecommendationRepository,
+)
 from app.infrastructure.services.group_subscriber import is_group_chat
 from app.presentation.bot.states import BotStates
 from app.presentation.bot.formatters.digest_formatter import DigestMessageFormatter, InlineKeyboardBuilder
@@ -41,6 +44,34 @@ async def _resolve_feed_user(session: AsyncSession, callback: CallbackQuery) -> 
     telegram_id = chat_id if is_group_chat(chat_id) else callback.from_user.id
     result = await session.execute(select(User).where(User.telegram_id == telegram_id))
     return result.scalar_one_or_none()
+
+
+WHY_POPUP_MAX_CHARS = 200  # Telegram's limit for a callback answer shown as an alert
+
+
+def _keyboard_state(callback: CallbackQuery) -> dict:
+    """Read which buttons a message currently shows.
+
+    Messages carry no state of their own, so the keyboard is the only record of
+    whether a post was expanded, saved or dismissed. Recommended messages are told
+    apart from Streaming ones by their Why button.
+    """
+    state = {"recommended": False, "has_more": False, "saved": False, "dismissed": False}
+    try:
+        for row in callback.message.reply_markup.inline_keyboard:
+            for btn in row:
+                data = btn.callback_data or ""
+                if data.startswith("why_rec_"):
+                    state["recommended"] = True
+                elif data.startswith("show_more_"):
+                    state["has_more"] = True
+                elif data.startswith("save_post_"):
+                    state["saved"] = btn.text.startswith("✅")
+                elif data.startswith("not_for_me_"):
+                    state["dismissed"] = "Noted" in btn.text
+    except (AttributeError, TypeError):
+        pass
+    return state
 
 
 @callback_router.callback_query(F.data.startswith("discuss_"))
@@ -306,13 +337,16 @@ async def handle_save_post(callback: CallbackQuery, session: AsyncSession):
 
         # Update button text to "✅ Saved"
         try:
-            has_more = any(
-                btn.callback_data.startswith("show_more_")
-                for row in callback.message.reply_markup.inline_keyboard
-                for btn in row
-            )
+            state = _keyboard_state(callback)
             builder = InlineKeyboardBuilder()
-            if has_more:
+            if state["recommended"]:
+                saved_keyboard = builder.build_recommendation_keyboard(
+                    post_id,
+                    expanded=not state["has_more"],
+                    saved=True,
+                    dismissed=state["dismissed"],
+                )
+            elif state["has_more"]:
                 saved_keyboard = builder.build_post_keyboard_saved(post_id)
             else:
                 saved_keyboard = builder.build_post_keyboard_without_more_saved(post_id)
@@ -376,9 +410,18 @@ async def handle_show_more(callback: CallbackQuery, session: AsyncSession):
         # For now, use reasonable defaults (1/1 since we're just showing the post)
         full_text = formatter.format_post_message_full(post, position=1, total=1, summary=summary_text)
 
-        # Build keyboard without "More" button
+        # Build keyboard without "More" button (recommended posts keep Why / Not for me)
         builder = InlineKeyboardBuilder()
-        keyboard = builder.build_post_keyboard_without_more(post_id)
+        state = _keyboard_state(callback)
+        if state["recommended"]:
+            keyboard = builder.build_recommendation_keyboard(
+                post_id,
+                expanded=True,
+                saved=state["saved"],
+                dismissed=state["dismissed"],
+            )
+        else:
+            keyboard = builder.build_post_keyboard_without_more(post_id)
 
         # Update message with expanded summary and new keyboard
         try:
@@ -408,6 +451,88 @@ async def handle_show_more(callback: CallbackQuery, session: AsyncSession):
     except Exception as e:
         logger.error(f"Error expanding summary: {e}", exc_info=True)
         await callback.answer("❌ Error loading summary.", show_alert=True)
+
+
+@callback_router.callback_query(F.data.startswith("why_rec_"))
+async def handle_why_recommended(callback: CallbackQuery, session: AsyncSession):
+    """Show why a post was recommended, as a popup.
+
+    The reason was written during the daily ranking and stored with the pick, so
+    this costs no LLM call. Logs a ``why`` activity, which only marks the pick as
+    looked at (it is not a verdict either way).
+
+    Args:
+        callback: Callback query from button press
+        session: Database session
+    """
+    post_id = callback.data.replace("why_rec_", "")
+    logger.info(f"Why button pressed by user {callback.from_user.id} for post {post_id}")
+
+    try:
+        user = await _resolve_feed_user(session, callback)
+        if not user:
+            await callback.answer("❌ User not found.", show_alert=True)
+            return
+
+        reason = await PostgresRecommendationRepository(session).get_reason(user.id, UUID(post_id))
+        if not reason:
+            await callback.answer("No reason was stored for this post.", show_alert=True)
+            return
+
+        try:
+            await PostgresActivityLogRepository(session).log_activity(user.id, post_id, "why")
+        except Exception as log_error:
+            logger.warning(f"Failed to log activity: {log_error}")
+
+        await callback.answer(f"💡 {reason}"[:WHY_POPUP_MAX_CHARS], show_alert=True)
+
+    except Exception as e:
+        logger.error(f"Error showing recommendation reason: {e}", exc_info=True)
+        await callback.answer("❌ Could not load the reason.", show_alert=True)
+
+
+@callback_router.callback_query(F.data.startswith("not_for_me_"))
+async def handle_not_for_me(callback: CallbackQuery, session: AsyncSession):
+    """Record that a recommended post is not wanted, and relabel the button.
+
+    A strong negative signal for the next daily run. A later Save on the same post
+    overrides it (the newest verdict wins).
+
+    Args:
+        callback: Callback query from button press
+        session: Database session
+    """
+    post_id = callback.data.replace("not_for_me_", "")
+    logger.info(f"Not for me pressed by user {callback.from_user.id} for post {post_id}")
+
+    try:
+        user = await _resolve_feed_user(session, callback)
+        if not user:
+            await callback.answer("❌ User not found.", show_alert=True)
+            return
+
+        try:
+            await PostgresActivityLogRepository(session).log_activity(user.id, post_id, "not_for_me")
+        except Exception as log_error:
+            logger.warning(f"Failed to log activity: {log_error}")
+
+        try:
+            state = _keyboard_state(callback)
+            keyboard = InlineKeyboardBuilder().build_recommendation_keyboard(
+                post_id,
+                expanded=not state["has_more"],
+                saved=state["saved"],
+                dismissed=True,
+            )
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        except Exception as edit_error:
+            logger.warning(f"Failed to update Not for me label: {edit_error}")
+
+        await callback.answer("👎 Noted — fewer posts like this.", show_alert=False)
+
+    except Exception as e:
+        logger.error(f"Error recording not-for-me: {e}", exc_info=True)
+        await callback.answer("👎 Noted!", show_alert=False)
 
 
 @callback_router.callback_query(F.data.startswith("actions_"))

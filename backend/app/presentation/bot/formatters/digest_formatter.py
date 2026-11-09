@@ -34,6 +34,7 @@ class DigestMessageFormatter:
         post: Post,
         position: int,
         total: int,
+        summary: Optional[str] = None,
     ) -> str:
         """Format a single post as a Telegram message.
 
@@ -54,6 +55,8 @@ class DigestMessageFormatter:
             post: Post model
             position: Position in digest (1-based)
             total: Total posts in digest
+            summary: Summary to show; defaults to post.summary. Pass the feed's own
+                summary instead of changing the shared ``post.summary`` column.
 
         Returns:
             Formatted message text (without buttons)
@@ -70,9 +73,9 @@ class DigestMessageFormatter:
             message_parts.append(f'<a href="{hn_link}">HN Discussion</a>')
 
         # Summary text (escaped — AI summaries often quote raw HTML/code)
-        summary = self._format_summary(post.summary)
-        if summary:
-            message_parts.append(f"\n{self._escape_html(summary)}")
+        summary_text = self._format_summary(summary if summary is not None else post.summary)
+        if summary_text:
+            message_parts.append(f"\n{self._escape_html(summary_text)}")
 
         # External article link (if available)
         if post.url:
@@ -155,6 +158,37 @@ class DigestMessageFormatter:
         message = self._truncate_to_limit(message, post.hn_id)
 
         return message
+
+    def format_recommendation_header(self, count: int, interests: list[str]) -> str:
+        """Format the message that opens a day's recommendations.
+
+        Args:
+            count: Number of picks that follow
+            interests: Interests the model inferred, most important first
+
+        Returns:
+            Header text (HTML)
+        """
+        noun = "pick" if count == 1 else "picks"
+        lines = [f"💡 <b>Recommended for you</b> — {count} {noun}"]
+        if interests:
+            joined = ", ".join(self._escape_html(i) for i in interests)
+            lines.append(f"\nBased on your saves: {joined}")
+        lines.append("\nTap 💡 Why for the reason. Tap 👎 Not for me to teach it what to skip.")
+        return "\n".join(lines)
+
+    def format_recommendation_message(
+        self,
+        post: Post,
+        summary: Optional[str],
+        position: int,
+        total: int,
+    ) -> str:
+        """Format one recommended post (same layout as the Streaming feed).
+
+        The reason is not in the message; the Why button shows it.
+        """
+        return self.format_post_message(post, position, total, summary=summary)
 
     def format_batch_header(self, total_posts: int) -> str:
         """Format header message for digest batch.
@@ -451,6 +485,46 @@ class InlineKeyboardBuilder:
         }
 
         return buttons
+
+    def build_recommendation_keyboard(
+        self,
+        post_id: str,
+        expanded: bool = False,
+        saved: bool = False,
+        dismissed: bool = False,
+    ) -> Dict[str, Any]:
+        """Build the inline keyboard for a recommended post.
+
+        Layout:
+        - [ 📖 More ] [ 🔖 Save ]
+        - [ 💡 Why ] [ 👎 Not for me ]
+
+        Args:
+            post_id: Post ID (UUID string)
+            expanded: True after More was tapped (the More button is dropped)
+            saved: True after Save was tapped (shows ✅ Saved)
+            dismissed: True after Not for me was tapped (shows 👎 Noted)
+
+        Returns:
+            Keyboard dict for aiogram InlineKeyboardMarkup
+        """
+        top = []
+        if not expanded:
+            top.append({"text": "📖 More", "callback_data": f"show_more_{post_id}"})
+        top.append(
+            {
+                "text": "✅ Saved" if saved else "🔖 Save",
+                "callback_data": f"save_post_{post_id}",
+            }
+        )
+        bottom = [
+            {"text": "💡 Why", "callback_data": f"why_rec_{post_id}"},
+            {
+                "text": "👎 Noted" if dismissed else "👎 Not for me",
+                "callback_data": f"not_for_me_{post_id}",
+            },
+        ]
+        return {"inline_keyboard": [top, bottom]}
 
     def build_batch_keyboard(self) -> Dict[str, Any]:
         """Build keyboard for batch header message.

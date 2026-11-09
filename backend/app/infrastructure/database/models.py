@@ -4,7 +4,20 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, Boolean, Column, Date, ForeignKey, Integer, JSON, Numeric, String, Text, TIMESTAMP
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    Date,
+    ForeignKey,
+    Integer,
+    JSON,
+    Numeric,
+    String,
+    Text,
+    TIMESTAMP,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -322,3 +335,68 @@ class UserActivityLog(Base):
 
     def __repr__(self):
         return f"<UserActivityLog(user_id={self.user_id}, post_id={self.post_id}, action={self.action_type}, at={self.created_at})>"
+
+
+class RecommendationRun(Base):
+    """One daily recommendation run: what the model inferred and what it was given.
+
+    Never overwritten, so changes in inferred interests can be tracked over time.
+    """
+
+    __tablename__ = "recommendation_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_date = Column(Date, nullable=False, index=True)  # local date in RECOMMENDATION_TIMEZONE
+
+    interests = Column(JSON, default=list)  # interests the model inferred from the signals
+    saved_count = Column(Integer, default=0)
+    not_for_me_count = Column(Integer, default=0)
+    opened_count = Column(Integer, default=0)
+    ignored_count = Column(Integer, default=0)
+    candidate_count = Column(Integer, default=0)
+
+    model = Column(String(100))
+    input_tokens = Column(Integer)
+    output_tokens = Column(Integer)
+
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    user = relationship("User")
+    recommendations = relationship("Recommendation", back_populates="run", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<RecommendationRun(user_id={self.user_id}, run_date={self.run_date})>"
+
+
+class Recommendation(Base):
+    """A post picked for a user by the daily recommendation run.
+
+    Kept apart from ``deliveries`` on purpose: a delivery row would hide the post from
+    the Streaming feed and break the reaction handlers, which expect one row per post.
+    """
+
+    __tablename__ = "recommendations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    run_id = Column(UUID(as_uuid=True), ForeignKey("recommendation_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    post_id = Column(UUID(as_uuid=True), ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    recommended_on = Column(Date, nullable=False, index=True)  # local date in RECOMMENDATION_TIMEZONE
+    rank = Column(Integer, nullable=False)
+    fit_score = Column(Integer, nullable=False)  # 1-5, from the model
+    reason = Column(Text, nullable=False)  # shown by the "Why" button
+
+    message_id = Column(Integer, nullable=True)  # Telegram message ID, set once sent
+    sent_at = Column(TIMESTAMP(timezone=True), nullable=True)  # NULL = picked but not sent yet
+
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    run = relationship("RecommendationRun", back_populates="recommendations")
+    post = relationship("Post")
+
+    __table_args__ = (UniqueConstraint("user_id", "post_id", name="uq_recommendations_user_post"),)
+
+    def __repr__(self):
+        return f"<Recommendation(user_id={self.user_id}, post_id={self.post_id}, fit={self.fit_score})>"
