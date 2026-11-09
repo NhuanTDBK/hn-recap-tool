@@ -8,8 +8,8 @@ The job fires several times a day. Flow of one run:
   5. One LLM call ranks them; the program applies the fit cut-off and the day's room.
   6. Record the run and picks, then send each pick, marking it sent as it goes.
 
-The cap is a ceiling across all of a day's runs: the number sent is however many
-strong matches there are. No post is picked twice: candidates exclude earlier picks,
+The optional cap (RECOMMENDATION_DAILY_MAX, 0 = no limit) is a ceiling across all of a
+day's runs: the number sent is however many strong matches there are. No post is picked twice: candidates exclude earlier picks,
 and the database rejects a repeat.
 """
 
@@ -167,15 +167,20 @@ class DailyRecommendationUseCase:
                 stats["status"] = "too_soon" if not stats["sent"] else "resumed"
                 return stats
 
-        room = settings.recommendation_daily_max - await self.repo.count_for_day(
-            user.id, today
-        )
-        if room <= 0:
-            logger.info(
-                f"Already picked {settings.recommendation_daily_max} today; done"
+        # RECOMMENDATION_DAILY_MAX <= 0 means no daily limit.
+        room: int | None = None
+        if settings.recommendation_daily_max > 0:
+            room = settings.recommendation_daily_max - await self.repo.count_for_day(
+                user.id, today
             )
-            stats["status"] = "daily_cap_reached" if not stats["sent"] else "resumed"
-            return stats
+            if room <= 0:
+                logger.info(
+                    f"Already picked {settings.recommendation_daily_max} today; done"
+                )
+                stats["status"] = (
+                    "daily_cap_reached" if not stats["sent"] else "resumed"
+                )
+                return stats
 
         signals = await self._load_signals(user.id, today)
         stats["signals"] = {
@@ -220,7 +225,8 @@ class DailyRecommendationUseCase:
         )
 
         chosen, dropped = self._select(result.picks)
-        chosen = chosen[:room]
+        if room is not None:
+            chosen = chosen[:room]
         by_hn = {c.hn_id: c for c in candidates}
         stats["interests"] = result.interests
         stats["picks"] = [self._describe(p, by_hn) for p in chosen]

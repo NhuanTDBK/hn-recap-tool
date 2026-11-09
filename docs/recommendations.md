@@ -17,15 +17,15 @@ The model acts like a personal editor with a clippings folder: saved posts are e
 
 - If a post has both a Save and a Not for me tap, the newer tap wins.
 - 💡 Why only counts as engagement. It does not change the verdict.
-- The model returns a **fit** from 3 to 5 per post and the interests it inferred. Code keeps `fit >= RECOMMENDATION_MIN_FIT` (4), sorts best first, and cuts to the day's remaining room.
-- `RECOMMENDATION_DAILY_MAX` (20) is a **ceiling**, not a target. A quiet day sends few posts, and nothing is padded.
+- The model returns a **fit** from 3 to 5 per post and the interests it inferred. Code keeps `fit >= RECOMMENDATION_MIN_FIT` (4), sorts best first, and cuts to the day's remaining room (if a cap is set).
+- There is **no daily limit** by default (`RECOMMENDATION_DAILY_MAX=0`). Set it above 0 to add a ceiling. Either way a quiet day sends few posts, and nothing is padded.
 - If the model's reply cannot be parsed twice, the run sends nothing. There is no fallback to "top by score".
 
 ## One run
 
 1. Resend unsent picks from earlier runs (up to one day old), each batch under its own header.
 2. Stop with `too_soon` if the last run started under `RECOMMENDATION_MIN_GAP_MINUTES` ago (unless `--force`).
-3. Stop with `daily_cap_reached` if the day already has `RECOMMENDATION_DAILY_MAX` picks. No LLM call is made.
+3. If `RECOMMENDATION_DAILY_MAX` is above 0, stop with `daily_cap_reached` when the day already has that many picks. No LLM call is made.
 4. Stop with `too_few_saves` if there are under `RECOMMENDATION_MIN_SAVES` saves.
 5. Load candidates: summaries for this feed newer than the last run (at most `RECOMMENDATION_LOOKBACK_HOURS` back), live crawled stories, not already saved, rejected or recommended. At most 150, highest score first.
 6. One LLM call ranks them.
@@ -35,7 +35,7 @@ The model acts like a personal editor with a clippings folder: saved posts are e
 
 - The candidate filter leaves out every post ever recommended, and the next run only looks past the last run's start time.
 - `recommendations` has `UNIQUE (user_id, post_id)`, and picks are inserted with `ON CONFLICT DO NOTHING`. Two runs that overlap cannot both send the same post.
-- The day is the local date in `RECOMMENDATION_TIMEZONE`. The cap counts every pick stored for that date.
+- The day is the local date in `RECOMMENDATION_TIMEZONE`. A cap, if set, counts every pick stored for that date.
 
 ## Messages and buttons
 
@@ -68,7 +68,7 @@ All in `backend/.env`; see `backend/.env.example`.
 | `RECOMMENDATION_ENABLED` | `false` | Registers the scheduler job |
 | `TELEGRAM_RECOMMENDATION_TOPIC_ID` | unset | Forum topic for the picks. Unset means nothing is sent |
 | `RECOMMENDATION_MODEL` | unset | Ranking model. Unset uses `OPENAI_MODEL`. Production uses `deepseek-v4-pro` |
-| `RECOMMENDATION_DAILY_MAX` | `20` | Ceiling per local day, across all runs |
+| `RECOMMENDATION_DAILY_MAX` | `0` | Optional ceiling per local day, across all runs. `0` = no limit |
 | `RECOMMENDATION_MIN_FIT` | `4` | Lowest fit that is sent |
 | `RECOMMENDATION_HOURS` | `8,12,16,20` | Local hours the job fires |
 | `RECOMMENDATION_MINUTE` | `30` | Minute of each hour |
@@ -87,7 +87,7 @@ All in `backend/.env`; see `backend/.env.example`.
 # Run now. Does nothing if the last run was under the minimum gap ago.
 .venv/bin/python backend/scripts/run_recommendations.py
 
-# Run anyway, still within the day's cap
+# Run anyway, still within the day's cap (if set)
 .venv/bin/python backend/scripts/run_recommendations.py --force
 ```
 

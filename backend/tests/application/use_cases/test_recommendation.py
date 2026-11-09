@@ -278,6 +278,18 @@ async def test_daily_cap_is_a_ceiling():
 
 
 @pytest.mark.asyncio
+async def test_no_daily_cap_by_default_sends_every_strong_match():
+    with patch.object(settings, "recommendation_daily_max", 0):
+        uc, repo, sender, _ = make(ranker=FakeRanker([5, 5, 5, 5, 5]))
+        stats = await uc.run(USER, now=NOW)
+        repo.add_candidates(300, 301, 302)
+        again = await uc.run(USER, now=NOW + timedelta(hours=4))
+
+    assert stats["sent"] == 5
+    assert again["status"] == "sent" and len(sender.picks) == 8
+
+
+@pytest.mark.asyncio
 async def test_fewer_strong_matches_than_cap_sends_fewer():
     uc, _, sender, _ = make(ranker=FakeRanker([5, 3, 3, 3, 3]))
     stats = await uc.run(USER, now=NOW)

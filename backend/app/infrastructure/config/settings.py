@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     recommendation_enabled: bool = False  # registers the job in run_scheduler.py
     telegram_recommendation_topic_id: Optional[int] = None  # forum topic for the picks
     recommendation_model: Optional[str] = None  # model for ranking; None = the app-wide OPENAI_MODEL
-    recommendation_daily_max: int = 20  # hard ceiling per day across all runs, not a target
+    recommendation_daily_max: int = 0  # optional ceiling per day across all runs; 0 = no limit
     recommendation_min_fit: int = 4  # the model rates each pick 1-5; lower scores are dropped
     recommendation_hours: str = "8,12,16,20"  # local hours the job fires, every 4h by default
     recommendation_minute: int = 30

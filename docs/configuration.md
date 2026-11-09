@@ -54,7 +54,7 @@ Optional. The job is off until `RECOMMENDATION_ENABLED=true`. How it works: [rec
 | `RECOMMENDATION_ENABLED` | No | `false` | Registers the job in `run_scheduler.py` |
 | `TELEGRAM_RECOMMENDATION_TOPIC_ID` | When enabled | - | Forum topic for the picks. If unset, nothing is sent |
 | `RECOMMENDATION_MODEL` | No | `OPENAI_MODEL` | Ranking model, for example `deepseek-v4-pro` |
-| `RECOMMENDATION_DAILY_MAX` | No | `20` | Ceiling per local day across all runs, not a target |
+| `RECOMMENDATION_DAILY_MAX` | No | `0` | Optional ceiling per local day across all runs. `0` means no limit |
 | `RECOMMENDATION_MIN_FIT` | No | `4` | Lowest fit (1-5) that is sent |
 | `RECOMMENDATION_HOURS` | No | `8,12,16,20` | Local hours the job fires |
 | `RECOMMENDATION_MINUTE` | No | `30` | Minute of each hour |

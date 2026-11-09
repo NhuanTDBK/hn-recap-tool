@@ -2,8 +2,8 @@
 """CLI script for the recommendations: picks learned from the group's saves.
 
 Reads the group's Save / "Not for me" / More taps, asks the model which posts summarized
-since the last run the reader would want, and sends only the strong matches (never more
-than RECOMMENDATION_DAILY_MAX in a day) to their own forum topic. The scheduler runs it
+since the last run the reader would want, and sends only the strong matches (no daily limit
+unless RECOMMENDATION_DAILY_MAX is set above 0) to their own forum topic. The scheduler runs it
 several times a day.
 
 Usage:
@@ -13,7 +13,7 @@ Usage:
     # Real run (does nothing if the last run was under the minimum gap ago)
     python scripts/run_recommendations.py
 
-    # Run anyway, still within the day's remaining cap
+    # Run anyway, still within the day's remaining cap, if one is set
     python scripts/run_recommendations.py --force
 """
 
