@@ -140,6 +140,8 @@ In the group, the buttons act on the group's feed, so members do not need to run
 
 ### Recommendations
 
+Full reference: [docs/recommendations.md](../docs/recommendations.md).
+
 To scroll less in the Streaming topic, the bot can send short lists of posts picked for you into a second topic of the same group, several times a day.
 
 Each run reads what the group did in the feed: **Save** (strong yes), **👎 Not for me** (strong no), **More** (weak yes) and recommended posts nobody touched (weak no). One LLM call picks only the strong matches from the last day's posts. Each pick has a **💡 Why** button that shows the reason. The daily maximum is a ceiling, not a target: some days bring a few posts, none are padded.

@@ -66,7 +66,13 @@ python scripts/run_delivery_pipeline.py
 
 # Run the Telegram bot
 python scripts/run_bot.py
+
+# Recommendations: preview only (one LLM call, sends nothing), then a real run
+python scripts/run_recommendations.py --dry-run
+python scripts/run_recommendations.py
 ```
+
+The scheduler (`scripts/run_scheduler.py`) runs recommendations on its own when `RECOMMENDATION_ENABLED=true`. See [../docs/recommendations.md](../docs/recommendations.md).
 
 ## Project Structure
 
@@ -102,6 +108,7 @@ backend/
 - **deliveries**: Tracks which posts were sent to users
 - **conversations**: Discussion threads (for future feature)
 - **agent_calls**: Token usage tracking per LLM call
+- **recommendation_runs** / **recommendations**: One row per recommendation run and per picked post. Kept apart from `deliveries` on purpose: a `deliveries` row hides the post from Streaming. `UNIQUE (user_id, post_id)` stops a post being picked twice
 - **user_token_usage**: Aggregated daily costs per user
 
 ### Key Foreign Keys

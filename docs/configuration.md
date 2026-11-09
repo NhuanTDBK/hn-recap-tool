@@ -45,6 +45,25 @@ All configuration is managed through environment variables in `backend/.env`.
 | `TELEGRAM_BOT_TOKEN` | Yes | - | Bot token from @BotFather |
 | `TELEGRAM_CHANNEL_ID` | Yes | - | Target channel or user ID for delivery |
 
+### Recommendations
+
+Optional. The job is off until `RECOMMENDATION_ENABLED=true`. How it works: [recommendations.md](recommendations.md).
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `RECOMMENDATION_ENABLED` | No | `false` | Registers the job in `run_scheduler.py` |
+| `TELEGRAM_RECOMMENDATION_TOPIC_ID` | When enabled | - | Forum topic for the picks. If unset, nothing is sent |
+| `RECOMMENDATION_MODEL` | No | `OPENAI_MODEL` | Ranking model, for example `deepseek-v4-pro` |
+| `RECOMMENDATION_DAILY_MAX` | No | `20` | Ceiling per local day across all runs, not a target |
+| `RECOMMENDATION_MIN_FIT` | No | `4` | Lowest fit (1-5) that is sent |
+| `RECOMMENDATION_HOURS` | No | `8,12,16,20` | Local hours the job fires |
+| `RECOMMENDATION_MINUTE` | No | `30` | Minute of each hour |
+| `RECOMMENDATION_MIN_GAP_MINUTES` | No | `120` | A run this soon after the last does nothing |
+| `RECOMMENDATION_TIMEZONE` | No | `Asia/Ho_Chi_Minh` | Zone for the hours and the day boundary |
+| `RECOMMENDATION_MIN_SAVES` | No | `5` | Fewer saves than this: skip |
+| `RECOMMENDATION_LOOKBACK_HOURS` | No | `36` | Longest candidate window |
+| `RECOMMENDATION_IGNORED_DAYS` | No | `14` | How far back untouched picks count as a weak no |
+
 ### Hacker News API
 
 | Variable | Required | Default | Description |

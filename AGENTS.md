@@ -103,7 +103,8 @@ python scripts/run_bot.py                        # Start Telegram bot
 1. **Ingest Pipeline**: HN API → PostgreSQL + RocksDB (hourly)
 2. **Summarization Pipeline**: Posts → OpenAI Agents → Summaries (every 30 min)
 3. **Delivery Pipeline**: Summaries → Telegram Bot → Users (scheduled)
-4. **Discussion Flow**: User ↔ Bot ↔ OpenAI (future)
+4. **Recommendation Pipeline**: Saves + new summaries → OpenAI Agent → picks in their own forum topic (4×/day, see [docs/recommendations.md](docs/recommendations.md))
+5. **Discussion Flow**: User ↔ Bot ↔ OpenAI (future)
 
 ## AI Agents
 
@@ -114,6 +115,11 @@ python scripts/run_bot.py                        # Start Telegram bot
   - Supports 5 styles: basic, technical, business, concise, personalized
   - Uses prompt caching for 90% cost reduction
   - Tracks token usage in database
+
+- **RecommendationAgent** (`backend/app/infrastructure/agents/recommendation_agent.py`)
+  - Reads Save / Not for me / More taps and ranks recent posts by fit (3-5) in one call per run
+  - Model set by `RECOMMENDATION_MODEL` (production: `deepseek-v4-pro`), separate from `OPENAI_MODEL`
+  - Details: [docs/recommendations.md](docs/recommendations.md)
 
 ### Planned Agents (Roadmap)
 
@@ -207,6 +213,8 @@ uv sync
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** - Comprehensive backend development guide
 - **[docs/spec.md](docs/spec.md)** - Full product specification
+- **[docs/recommendations.md](docs/recommendations.md)** - Recommendations: signals, schedule, settings, operations
+- **[docs/configuration.md](docs/configuration.md)** - Environment variable reference
 - **[backend/README.md](backend/README.md)** - Backend quick start
 - **[README.md](README.md)** - Project overview
 
@@ -326,6 +334,7 @@ Schedule these scripts:
 - `trigger_posts_collection.py` - Hourly (collect HN posts)
 - `run_personalized_summarization.py` - Every 30 min (generate summaries)
 - `run_delivery_pipeline.py` - User-scheduled (deliver summaries)
+- `run_recommendations.py` - Registered by `run_scheduler.py` at `RECOMMENDATION_HOURS` (default 08:30, 12:30, 16:30, 20:30 UTC+7) when `RECOMMENDATION_ENABLED=true`; do not add a separate cron
 
 ## Contributing
 
