@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy import Select, and_, delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.recommendation import ENGAGED_ACTIONS, STRONG_ACTIONS, PostBrief, clip
@@ -177,8 +178,8 @@ class PostgresRecommendationRepository:
 
     # ------------------------------------------------------------ run / picks
 
-    async def delete_stale_unsent(self, user_id: int, today: date) -> int:
-        """Delete picks from earlier days that were never sent.
+    async def delete_stale_unsent(self, user_id: int, before: date) -> int:
+        """Delete picks from days before ``before`` that were never sent.
 
         They were never delivered, so deleting them lets those posts be considered
         again; the unique constraint would otherwise block them forever.
@@ -187,53 +188,51 @@ class PostgresRecommendationRepository:
             delete(Recommendation).where(
                 Recommendation.user_id == user_id,
                 Recommendation.sent_at.is_(None),
-                Recommendation.recommended_on < today,
+                Recommendation.recommended_on < before,
             )
         )
         await self.session.commit()
         return result.rowcount or 0
 
-    async def get_pending(self, user_id: int, today: date) -> list[Recommendation]:
-        """Return today's picks that are saved but not sent yet, best first."""
+    async def get_pending(self, user_id: int, since: date) -> list[Recommendation]:
+        """Return picks from ``since`` on that are stored but not sent yet, oldest first."""
         stmt = (
             select(Recommendation)
             .where(
                 Recommendation.user_id == user_id,
-                Recommendation.recommended_on == today,
+                Recommendation.recommended_on >= since,
                 Recommendation.sent_at.is_(None),
             )
-            .order_by(Recommendation.rank.asc())
+            .order_by(Recommendation.recommended_on.asc(), Recommendation.rank.asc())
         )
         return list((await self.session.execute(stmt)).scalars().all())
 
-    async def count_sent(self, user_id: int, day: date) -> int:
-        """Count picks already sent on ``day``."""
+    async def count_for_day(self, user_id: int, day: date) -> int:
+        """Count picks stored for ``day`` (sent or still waiting), against the daily cap."""
         stmt = select(func.count(Recommendation.id)).where(
             Recommendation.user_id == user_id,
             Recommendation.recommended_on == day,
+        )
+        return int((await self.session.execute(stmt)).scalar_one())
+
+    async def count_sent_in_run(self, run_id: UUID) -> int:
+        """Count picks of one run that already reached Telegram."""
+        stmt = select(func.count(Recommendation.id)).where(
+            Recommendation.run_id == run_id,
             Recommendation.sent_at.isnot(None),
         )
         return int((await self.session.execute(stmt)).scalar_one())
 
-    async def has_run_on(self, user_id: int, day: date) -> bool:
-        """Return True if a run was already recorded for ``day``."""
-        stmt = select(func.count(RecommendationRun.id)).where(
-            RecommendationRun.user_id == user_id,
-            RecommendationRun.run_date == day,
+    async def get_last_run_at(self, user_id: int) -> datetime | None:
+        """Return when the newest run for this feed started, or None if none ran."""
+        stmt = select(func.max(RecommendationRun.created_at)).where(
+            RecommendationRun.user_id == user_id
         )
-        return int((await self.session.execute(stmt)).scalar_one()) > 0
+        return (await self.session.execute(stmt)).scalar_one_or_none()
 
-    async def get_run_interests(self, user_id: int, day: date) -> list[str]:
-        """Return the interests inferred by the newest run on ``day``."""
-        stmt = (
-            select(RecommendationRun.interests)
-            .where(
-                RecommendationRun.user_id == user_id,
-                RecommendationRun.run_date == day,
-            )
-            .order_by(RecommendationRun.created_at.desc())
-            .limit(1)
-        )
+    async def get_run_interests(self, run_id: UUID) -> list[str]:
+        """Return the interests the model inferred in one run."""
+        stmt = select(RecommendationRun.interests).where(RecommendationRun.id == run_id)
         return list((await self.session.execute(stmt)).scalar_one_or_none() or [])
 
     async def create_run(
@@ -245,12 +244,18 @@ class PostgresRecommendationRepository:
         model: str,
         input_tokens: int,
         output_tokens: int,
+        started_at: datetime,
     ) -> RecommendationRun:
-        """Record a run (flushed, not committed, so picks can join it atomically)."""
+        """Record a run (flushed, not committed, so picks can join it atomically).
+
+        ``started_at`` is stored as ``created_at``: the next run only looks at summaries
+        newer than it, so a summary written while this run was ranking is not missed.
+        """
         run = RecommendationRun(
             id=uuid4(),
             user_id=user_id,
             run_date=day,
+            created_at=started_at,
             interests=interests,
             saved_count=counts.get("saved", 0),
             not_for_me_count=counts.get("not_for_me", 0),
@@ -274,6 +279,9 @@ class PostgresRecommendationRepository:
     ) -> list[Recommendation]:
         """Store picks (unsent) and commit the run with them.
 
+        A post already recommended to this user is skipped by the database, so two
+        runs that overlap cannot both pick it.
+
         Args:
             run_id: Run these belong to
             user_id: Feed owner
@@ -281,24 +289,53 @@ class PostgresRecommendationRepository:
             picks: ``(post_id, rank, fit, reason)`` per pick
 
         Returns:
-            The stored rows, in the order given
+            The rows actually stored, best first (fewer than given if some were repeats)
         """
-        rows = [
-            Recommendation(
-                id=uuid4(),
-                run_id=run_id,
-                user_id=user_id,
-                post_id=post_id,
-                recommended_on=day,
-                rank=rank,
-                fit_score=fit,
-                reason=reason,
-            )
-            for post_id, rank, fit, reason in picks
-        ]
-        self.session.add_all(rows)
+        if not picks:
+            await self.session.commit()
+            return []
+
+        result = await self.session.execute(
+            self.insert_picks_stmt(run_id, user_id, day, picks)
+        )
+        stored_ids = list(result.scalars().all())
         await self.session.commit()
-        return rows
+
+        rows = await self.session.execute(
+            select(Recommendation)
+            .where(Recommendation.id.in_(stored_ids))
+            .order_by(Recommendation.rank.asc())
+        )
+        return list(rows.scalars().all())
+
+    @staticmethod
+    def insert_picks_stmt(
+        run_id: UUID,
+        user_id: int,
+        day: date,
+        picks: list[tuple[UUID, int, int, str]],
+    ):
+        """Build the insert that skips posts already recommended to this user."""
+        return (
+            pg_insert(Recommendation)
+            .values(
+                [
+                    {
+                        "id": uuid4(),
+                        "run_id": run_id,
+                        "user_id": user_id,
+                        "post_id": post_id,
+                        "recommended_on": day,
+                        "rank": rank,
+                        "fit_score": fit,
+                        "reason": reason,
+                    }
+                    for post_id, rank, fit, reason in picks
+                ]
+            )
+            .on_conflict_do_nothing(constraint="uq_recommendations_user_post")
+            .returning(Recommendation.id)
+        )
 
     async def mark_sent(self, rec_id: UUID, message_id: int) -> None:
         """Record that a pick reached Telegram. Committed at once so a crash cannot resend it."""

@@ -180,7 +180,7 @@ def create_recommendation_agent(model: str = settings.openai_model) -> BaseAgent
 
 
 async def rank_candidates(
-    signals: TasteSignals, candidates: list[PostBrief]
+    signals: TasteSignals, candidates: list[PostBrief], model: str | None = None
 ) -> RankingResult:
     """Ask the model which candidates this reader would want.
 
@@ -190,6 +190,7 @@ async def rank_candidates(
     Args:
         signals: The reader's taste signals
         candidates: Posts to choose from (must not be empty)
+        model: Model to use; defaults to the app-wide model
 
     Returns:
         Interests, picks (unfiltered by fit) and token usage
@@ -198,7 +199,9 @@ async def rank_candidates(
         RankingParseError: If both attempts return unusable replies
         RankingError: If the model call itself fails (network, rate limit, ...)
     """
-    agent = create_recommendation_agent()
+    agent = (
+        create_recommendation_agent(model) if model else create_recommendation_agent()
+    )
     user_input = build_ranking_input(signals, candidates)
     valid_ids = {c.hn_id for c in candidates}
 

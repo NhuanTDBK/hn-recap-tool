@@ -54,8 +54,12 @@ async def pipeline() -> None:
     # Step 1: Collect posts
     logger.info("[1/4] Collecting HN posts...")
     try:
-        engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True)
-        session_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        engine = create_async_engine(
+            settings.database_url, echo=False, pool_pre_ping=True
+        )
+        session_factory = sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False
+        )
         async with session_factory() as session:
             await collect_run_once(session, score_threshold=50, posts_limit=100)
         await engine.dispose()
@@ -129,39 +133,52 @@ async def recommendations_job() -> None:
     )
 
 
-def schedule_recommendations(scheduler: AsyncIOScheduler) -> None:
-    """Register the daily recommendations job and its same-day retry.
+def recommendation_hours() -> list[int]:
+    """Parse RECOMMENDATION_HOURS (e.g. "8,12,16,20") into sorted local hours.
 
-    The retry resends picks a failed send left behind. It does nothing if the first
-    run finished, and costs an LLM call only if ranking failed.
+    Raises:
+        ValueError: If it is empty or holds anything but whole hours 0-23
+    """
+    hours = sorted(
+        {int(h) for h in settings.recommendation_hours.split(",") if h.strip()}
+    )
+    if not hours or not all(0 <= h <= 23 for h in hours):
+        raise ValueError(
+            f"RECOMMENDATION_HOURS must list hours 0-23, got {settings.recommendation_hours!r}"
+        )
+    return hours
+
+
+def schedule_recommendations(scheduler: AsyncIOScheduler) -> None:
+    """Register the recommendations job, firing at each of RECOMMENDATION_HOURS.
+
+    A run only looks at summaries newer than the last run, resends picks an earlier
+    send left unsent, and stops once the day's cap is used, so the slots do not repeat
+    each other's work.
 
     Args:
-        scheduler: Scheduler to add the jobs to
+        scheduler: Scheduler to add the job to
     """
-    hour = settings.recommendation_hour
-    # A retry past midnight would count as the next day's run.
-    hours = [(hour, "")] if hour == 23 else [(hour, ""), (hour + 1, "_retry")]
-
-    for fire_hour, suffix in hours:
-        scheduler.add_job(
-            recommendations_job,
-            trigger=CronTrigger(
-                hour=fire_hour,
-                minute=settings.recommendation_minute,
-                timezone=settings.recommendation_timezone,
-            ),
-            id=f"hn_pal_recommendations{suffix}",
-            name=f"HN Pal Daily Recommendations{suffix}",
-            max_instances=1,
-            coalesce=True,
-            # Shares an event loop with the hourly pipeline; the default grace of 1s
-            # would silently skip the day's run if the loop is busy at fire time.
-            misfire_grace_time=3000,
-            replace_existing=True,
-        )
+    hours = recommendation_hours()
+    scheduler.add_job(
+        recommendations_job,
+        trigger=CronTrigger(
+            hour=",".join(str(h) for h in hours),
+            minute=settings.recommendation_minute,
+            timezone=settings.recommendation_timezone,
+        ),
+        id="hn_pal_recommendations",
+        name="HN Pal Recommendations",
+        max_instances=1,
+        coalesce=True,
+        # Shares an event loop with the hourly pipeline; the default grace of 1s
+        # would silently skip a slot if the loop is busy at fire time.
+        misfire_grace_time=1800,
+        replace_existing=True,
+    )
     logger.info(
-        "Recommendations enabled — fires daily at %02d:%02d %s (retry 1h later unless 23h)",
-        hour,
+        "Recommendations enabled — fires at %s :%02d %s",
+        ",".join(f"{h:02d}" for h in hours),
         settings.recommendation_minute,
         settings.recommendation_timezone,
     )

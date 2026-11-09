@@ -47,3 +47,23 @@ def test_saved_rejected_and_already_recommended_posts_are_excluded(sql):
 
 def test_highest_score_first(sql):
     assert "ORDER BY posts.score DESC" in sql
+
+
+def test_insert_skips_a_post_already_recommended_to_the_user():
+    from datetime import date
+    from uuid import uuid4
+
+    stmt = PostgresRecommendationRepository.insert_picks_stmt(
+        uuid4(), 7, date(2026, 11, 9), [(uuid4(), 1, 5, "r"), (uuid4(), 2, 4, "s")]
+    )
+    sql = str(stmt.compile(dialect=postgresql.dialect()))
+
+    assert "ON CONFLICT ON CONSTRAINT uq_recommendations_user_post DO NOTHING" in sql
+    assert "RETURNING recommendations.id" in sql
+
+
+def test_the_unique_constraint_the_insert_names_exists_on_the_model():
+    from app.infrastructure.database.models import Recommendation
+
+    names = {c.name for c in Recommendation.__table__.constraints}
+    assert "uq_recommendations_user_post" in names

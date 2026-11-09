@@ -1,13 +1,16 @@
-"""Daily recommendations: pick the posts a reader will want from their own taste.
+"""Recommendations: pick the posts a reader will want from their own taste.
 
-Flow of one run:
-  1. Resume today's unsent picks, if a previous run crashed mid-send.
-  2. Read taste signals (saves, "not for me", opened, ignored) from the activity log.
-  3. Load the last day's candidate posts.
-  4. One LLM call ranks them; the program applies the fit cut-off and the daily cap.
-  5. Record the run and picks, then send each pick, marking it sent as it goes.
+The job fires several times a day. Flow of one run:
+  1. Resend unsent picks left by an earlier run, if any.
+  2. Stop if the last run was too recent, or the day's cap is already used.
+  3. Read taste signals (saves, "not for me", opened, ignored) from the activity log.
+  4. Load candidates: summaries newer than the last run, never picked before.
+  5. One LLM call ranks them; the program applies the fit cut-off and the day's room.
+  6. Record the run and picks, then send each pick, marking it sent as it goes.
 
-The cap is a ceiling: the number sent is however many strong matches there are.
+The cap is a ceiling across all of a day's runs: the number sent is however many
+strong matches there are. No post is picked twice: candidates exclude earlier picks,
+and the database rejects a repeat.
 """
 
 import asyncio
@@ -99,17 +102,17 @@ class DailyRecommendationUseCase:
         force: bool = False,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Run today's recommendations.
+        """Run one recommendation slot.
 
         Args:
             user: The feed to recommend for (the group's subscriber row)
             dry_run: Rank and report, but write and send nothing
-            force: Run again even if today already has a run, within the remaining cap
+            force: Run even if the last run was under the minimum gap ago
             now: Current time (for tests)
 
         Returns:
-            Stats with a ``status``: sent, resumed, dry_run, already_ran, no_picks,
-            too_few_saves, no_candidates, ranking_failed, send_failed, no_topic
+            Stats with a ``status``: sent, resumed, dry_run, too_soon, daily_cap_reached,
+            no_picks, too_few_saves, no_candidates, ranking_failed, send_failed, no_topic
         """
         now = now or datetime.now(timezone.utc)
         today = now.astimezone(ZoneInfo(settings.recommendation_timezone)).date()
@@ -133,29 +136,46 @@ class DailyRecommendationUseCase:
             stats["status"] = "no_topic"
             return stats
 
-        if not dry_run:
-            removed = await self.repo.delete_stale_unsent(user.id, today)
-            if removed:
-                logger.warning(f"Dropped {removed} unsent pick(s) from earlier days")
+        last_run_at = await self.repo.get_last_run_at(user.id)
 
-            pending = await self.repo.get_pending(user.id, today)
+        if not dry_run:
+            # Unsent picks stay resendable for one more day, so a failure at the last
+            # slot of a day is retried by the first slot of the next.
+            keep_from = today - timedelta(days=1)
+            removed = await self.repo.delete_stale_unsent(user.id, keep_from)
+            if removed:
+                logger.warning(
+                    f"Dropped {removed} unsent pick(s) older than {keep_from}"
+                )
+
+            pending = await self.repo.get_pending(user.id, keep_from)
             if pending:
                 logger.info(
-                    f"Resuming {len(pending)} unsent pick(s) from today's earlier run"
+                    f"Resending {len(pending)} unsent pick(s) from earlier runs"
                 )
-                await self._send(
-                    user,
-                    pending,
-                    await self._resume_header(user.id, today, pending),
-                    stats,
+                await self._resend(user, pending, stats)
+                if not stats["sent"]:
+                    stats["status"] = "send_failed"
+                    return stats
+
+            min_gap = timedelta(minutes=settings.recommendation_min_gap_minutes)
+            if not force and last_run_at is not None and now - last_run_at < min_gap:
+                logger.info(
+                    f"Last run was at {last_run_at.isoformat()}, under "
+                    f"{settings.recommendation_min_gap_minutes} min ago; use force to run anyway"
                 )
-                stats["status"] = "resumed" if stats["sent"] else "send_failed"
+                stats["status"] = "too_soon" if not stats["sent"] else "resumed"
                 return stats
 
-            if not force and await self.repo.has_run_on(user.id, today):
-                logger.info("Recommendations already ran today; use force to run again")
-                stats["status"] = "already_ran"
-                return stats
+        room = settings.recommendation_daily_max - await self.repo.count_for_day(
+            user.id, today
+        )
+        if room <= 0:
+            logger.info(
+                f"Already picked {settings.recommendation_daily_max} today; done"
+            )
+            stats["status"] = "daily_cap_reached" if not stats["sent"] else "resumed"
+            return stats
 
         signals = await self._load_signals(user.id, today)
         stats["signals"] = {
@@ -173,11 +193,15 @@ class DailyRecommendationUseCase:
             stats["status"] = "too_few_saves"
             return stats
 
+        # Only summaries newer than the last run: posts the model already rated and
+        # passed over are not paid for again. The lookback bounds it after a long gap.
         cutoff = now - timedelta(hours=settings.recommendation_lookback_hours)
+        if last_run_at is not None:
+            cutoff = max(cutoff, last_run_at)
         candidates = await self.repo.get_candidates(user.id, cutoff, CANDIDATE_LIMIT)
         stats["candidate_count"] = len(candidates)
         if not candidates:
-            logger.info("No candidate posts in the lookback window")
+            logger.info("No new candidate posts since the last run")
             stats["status"] = "no_candidates"
             return stats
 
@@ -185,7 +209,7 @@ class DailyRecommendationUseCase:
         try:
             result = await self.ranker(signals, candidates)
         except RankingError as e:
-            logger.error(f"Ranking failed, sending nothing today: {e}")
+            logger.error(f"Ranking failed, sending nothing this run: {e}")
             await self._log_usage(
                 e.input_tokens, e.output_tokens, started, "error", str(e)
             )
@@ -196,7 +220,7 @@ class DailyRecommendationUseCase:
         )
 
         chosen, dropped = self._select(result.picks)
-        chosen = chosen[: await self._cap(user.id, today, force)]
+        chosen = chosen[:room]
         by_hn = {c.hn_id: c for c in candidates}
         stats["interests"] = result.interests
         stats["picks"] = [self._describe(p, by_hn) for p in chosen]
@@ -220,6 +244,7 @@ class DailyRecommendationUseCase:
             self.model,
             result.input_tokens,
             result.output_tokens,
+            now,
         )
         rows = await self.repo.add_picks(
             run.id,
@@ -232,7 +257,7 @@ class DailyRecommendationUseCase:
         )
 
         if not rows:
-            logger.info("Nothing met the fit cut-off today; sending nothing")
+            logger.info("Nothing new met the fit cut-off; sending nothing")
             stats["status"] = "no_picks"
             return stats
 
@@ -242,18 +267,22 @@ class DailyRecommendationUseCase:
 
     # ---------------------------------------------------------------- helpers
 
-    async def _resume_header(
-        self, user_id: int, today: date, pending: list[Recommendation]
-    ) -> tuple[int, list[str]] | None:
-        """Return the header for resumed picks, or None if today's list already opened."""
-        if await self.repo.count_sent(user_id, today) > 0:
-            return None
-        return len(pending), await self.repo.get_run_interests(user_id, today)
+    async def _resend(
+        self, user: User, pending: list[Recommendation], stats: dict[str, Any]
+    ) -> None:
+        """Resend unsent picks one run at a time, each run's batch under its own header.
 
-    async def _cap(self, user_id: int, today: date, force: bool) -> int:
-        """Return how many picks may still be sent today."""
-        sent = await self.repo.count_sent(user_id, today) if force else 0
-        return max(0, settings.recommendation_daily_max - sent)
+        A run whose header already went out (some picks were sent) gets no second one.
+        """
+        by_run: dict[Any, list[Recommendation]] = {}
+        for rec in pending:
+            by_run.setdefault(rec.run_id, []).append(rec)
+
+        for run_id, rows in by_run.items():
+            header = None
+            if await self.repo.count_sent_in_run(run_id) == 0:
+                header = (len(rows), await self.repo.get_run_interests(run_id))
+            await self._send(user, rows, header, stats)
 
     @staticmethod
     def _select(picks: list[RankedPick]) -> tuple[list[RankedPick], list[RankedPick]]:
@@ -314,8 +343,8 @@ class DailyRecommendationUseCase:
     ) -> None:
         """Send picks one by one, marking each sent as soon as Telegram accepts it.
 
-        A pick that fails stays unsent. The scheduler's retry job, or a manual run, resends
-        it later the same day; after that day it is discarded.
+        A pick that fails stays unsent. The next run resends it; after a day it is
+        discarded.
         """
         assert self.sender is not None, "sender is required unless dry_run"
         topic_id = settings.telegram_recommendation_topic_id

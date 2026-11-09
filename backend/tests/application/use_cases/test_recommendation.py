@@ -53,9 +53,24 @@ class FakeRepo:
         self.sent_ids: list = []
         self.runs: list = []
         self.recs: list = []
+        self.cutoffs: list = []
 
     def _brief(self, hn_id: int) -> PostBrief:
         return PostBrief(uuid4(), hn_id, f"Title {hn_id}", "x.com", 50, "summary")
+
+    def add_candidates(self, *hn_ids: int) -> list[PostBrief]:
+        """Add fresh candidate posts (brief and post row), as new summaries would be."""
+        added = [self._brief(i) for i in hn_ids]
+        for c in added:
+            self.posts[c.post_id] = Post(
+                id=c.post_id,
+                hn_id=c.hn_id,
+                title=c.title,
+                url="https://x.com/n",
+                score=50,
+            )
+        self.candidates = self.candidates + added
+        return added
 
     # signals
     async def get_activity(self, user_id):
@@ -68,41 +83,64 @@ class FakeRepo:
         return self.sent_ids
 
     async def get_candidates(self, user_id, cutoff, limit):
-        return self.candidates
+        self.cutoffs.append(cutoff)
+        taken = {r.post_id for r in self.recs}  # never recommend a post twice
+        return [c for c in self.candidates if c.post_id not in taken]
 
     # run state
-    async def delete_stale_unsent(self, user_id, today):
-        stale = [r for r in self.recs if r.sent_at is None and r.recommended_on < today]
+    async def delete_stale_unsent(self, user_id, before):
+        stale = [
+            r for r in self.recs if r.sent_at is None and r.recommended_on < before
+        ]
         self.recs = [r for r in self.recs if r not in stale]
         return len(stale)
 
-    async def get_pending(self, user_id, today):
-        return [r for r in self.recs if r.sent_at is None and r.recommended_on == today]
-
-    async def has_run_on(self, user_id, day):
-        return any(r.run_date == day for r in self.runs)
-
-    async def count_sent(self, user_id, day):
-        return sum(
-            1 for r in self.recs if r.sent_at is not None and r.recommended_on == day
+    async def get_pending(self, user_id, since):
+        return sorted(
+            (r for r in self.recs if r.sent_at is None and r.recommended_on >= since),
+            key=lambda r: (r.recommended_on, r.rank),
         )
 
-    async def get_run_interests(self, user_id, day):
-        return next((r.interests for r in reversed(self.runs) if r.run_date == day), [])
+    async def get_last_run_at(self, user_id):
+        return max((r.created_at for r in self.runs), default=None)
+
+    async def count_for_day(self, user_id, day):
+        return sum(1 for r in self.recs if r.recommended_on == day)
+
+    async def count_sent_in_run(self, run_id):
+        return sum(1 for r in self.recs if r.run_id == run_id and r.sent_at is not None)
+
+    async def get_run_interests(self, run_id):
+        return next((r.interests for r in self.runs if r.id == run_id), [])
 
     async def create_run(
-        self, user_id, day, interests, counts, model, input_tokens, output_tokens
+        self,
+        user_id,
+        day,
+        interests,
+        counts,
+        model,
+        input_tokens,
+        output_tokens,
+        started_at,
     ):
         run = SimpleNamespace(
-            id=uuid4(), run_date=day, interests=interests, counts=counts, model=model
+            id=uuid4(),
+            run_date=day,
+            interests=interests,
+            counts=counts,
+            model=model,
+            created_at=started_at,
         )
         self.runs.append(run)
         return run
 
     async def add_picks(self, run_id, user_id, day, picks):
+        taken = {r.post_id for r in self.recs}  # the database's unique (user, post)
         rows = [
             SimpleNamespace(
                 id=uuid4(),
+                run_id=run_id,
                 post_id=pid,
                 rank=rank,
                 fit_score=fit,
@@ -112,6 +150,7 @@ class FakeRepo:
                 message_id=None,
             )
             for pid, rank, fit, reason in picks
+            if pid not in taken
         ]
         self.recs.extend(rows)
         return rows
@@ -182,6 +221,7 @@ def rec_settings():
         patch.object(settings, "recommendation_min_saves", 5),
         patch.object(settings, "recommendation_lookback_hours", 36),
         patch.object(settings, "recommendation_ignored_days", 14),
+        patch.object(settings, "recommendation_min_gap_minutes", 120),
     ):
         yield
 
@@ -252,38 +292,137 @@ async def test_nothing_qualifying_sends_nothing_but_still_records_the_run():
 
     assert stats["status"] == "no_picks"
     assert sender.headers == [] and sender.picks == []
-    assert len(repo.runs) == 1  # so a rerun today does not pay for another LLM call
+    assert len(repo.runs) == 1  # so the next run starts after these posts
 
     again = await uc.run(USER, now=NOW)
-    assert again["status"] == "already_ran" and ranker.calls == 1
+    assert again["status"] == "too_soon" and ranker.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_second_run_same_day_makes_no_llm_call_and_sends_nothing():
+async def test_a_run_right_after_another_makes_no_llm_call_and_sends_nothing():
     uc, _, sender, ranker = make()
     await uc.run(USER, now=NOW)
     sent_first = len(sender.picks)
 
-    stats = await uc.run(USER, now=NOW)
+    stats = await uc.run(USER, now=NOW + timedelta(minutes=30))
 
-    assert stats["status"] == "already_ran"
+    assert stats["status"] == "too_soon"
     assert ranker.calls == 1 and len(sender.picks) == sent_first
 
 
 @pytest.mark.asyncio
-async def test_force_respects_what_was_already_sent_today():
+async def test_force_overrides_the_minimum_gap():
+    uc, repo, _, ranker = make()
+    await uc.run(USER, now=NOW)
+    repo.add_candidates(300, 301)
+
+    stats = await uc.run(USER, force=True, now=NOW + timedelta(minutes=30))
+
+    assert stats["status"] in {"sent", "no_picks"} and ranker.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_a_later_run_only_sees_posts_newer_than_the_last_run():
+    uc, repo, _, ranker = make(ranker=FakeRanker([5, 5, 5, 5, 5]))
+    await uc.run(USER, now=NOW)
+    later = NOW + timedelta(hours=4)
+
+    await uc.run(USER, now=later)
+
+    assert repo.cutoffs[0] == NOW - timedelta(hours=36)  # first run: the lookback
+    assert repo.cutoffs[1] == NOW  # next run: since the last one started
+    assert ranker.calls == 1  # every candidate was already picked, so nothing to rank
+
+
+@pytest.mark.asyncio
+async def test_a_post_picked_in_one_run_is_never_picked_in_the_next():
+    uc, repo, sender, _ = make(ranker=FakeRanker([5, 5, 5, 5, 5]))
+    await uc.run(USER, now=NOW)
+    repo.add_candidates(300, 301)  # last run's posts are still in the feed
+
+    await uc.run(USER, now=NOW + timedelta(hours=4))
+
+    sent_hn = [p[2] for p in sender.picks]
+    assert len(sent_hn) == len(set(sent_hn)) == 7
+    assert {300, 301} <= set(sent_hn)
+
+
+@pytest.mark.asyncio
+async def test_daily_cap_is_shared_by_all_of_a_days_runs():
+    with patch.object(settings, "recommendation_daily_max", 3):
+        uc, repo, sender, ranker = make(ranker=FakeRanker([5, 5]))
+        await uc.run(USER, now=NOW)  # 2 of 3
+        repo.add_candidates(300, 301, 302, 303, 304)
+        ranker.fits = [5, 5, 5, 5, 5]
+        await uc.run(USER, now=NOW + timedelta(hours=4))  # the last 1 of 3
+        calls_before = ranker.calls
+        stats = await uc.run(USER, now=NOW + timedelta(hours=8))
+
+    assert len(sender.picks) == 3
+    assert stats["status"] == "daily_cap_reached"
+    assert ranker.calls == calls_before  # no LLM call once the cap is used
+
+
+@pytest.mark.asyncio
+async def test_the_daily_cap_starts_over_the_next_local_day():
+    with patch.object(settings, "recommendation_daily_max", 2):
+        uc, repo, sender, _ = make(ranker=FakeRanker([5, 5, 5, 5, 5]))
+        await uc.run(USER, now=NOW)
+        repo.add_candidates(300, 301)
+        stats = await uc.run(USER, now=NOW + timedelta(hours=24))
+
+    assert stats["status"] == "sent" and len(sender.picks) == 4
+
+
+@pytest.mark.asyncio
+async def test_an_overlapping_run_cannot_make_a_post_go_out_twice():
+    repo = FakeRepo()
+    sender = FakeSender()
+    inner = FakeRanker([5, 5, 5, 5, 5])
+
+    async def ranker(signals, candidates):
+        result = await inner(signals, candidates)
+        # A second run stores the first candidate while this one is still ranking.
+        repo.recs.append(
+            SimpleNamespace(
+                id=uuid4(),
+                run_id=uuid4(),
+                post_id=candidates[0].post_id,
+                recommended_on=TODAY,
+                sent_at=NOW,
+                rank=1,
+            )
+        )
+        return result
+
+    uc = DailyRecommendationUseCase(
+        repo, sender, ranker, model="m", message_delay_seconds=0
+    )
+    await uc.run(USER, now=NOW)
+
+    assert 100 not in [p[2] for p in sender.picks]  # the other run owns it
+    assert len(sender.picks) == 4 and sender.headers[0][2] == 4
+
+
+@pytest.mark.asyncio
+async def test_force_still_respects_the_picks_already_made_today():
     with patch.object(settings, "recommendation_daily_max", 3):
         uc, repo, sender, _ = make(ranker=FakeRanker([5, 5, 5, 5, 5]))
-        repo.runs.append(SimpleNamespace(run_date=TODAY))
+        repo.runs.append(SimpleNamespace(id=uuid4(), created_at=NOW))
         repo.recs = [
             SimpleNamespace(
-                id=uuid4(), post_id=uuid4(), recommended_on=TODAY, sent_at=NOW, rank=i
+                id=uuid4(),
+                run_id=repo.runs[0].id,
+                post_id=uuid4(),
+                recommended_on=TODAY,
+                sent_at=NOW,
+                rank=i,
             )
             for i in range(2)
         ]
         stats = await uc.run(USER, force=True, now=NOW)
 
-    assert stats["sent"] == 1  # 3 allowed, 2 already sent
+    assert stats["sent"] == 1  # 3 allowed, 2 already picked
 
 
 @pytest.mark.asyncio
@@ -451,21 +590,48 @@ async def test_header_failing_again_on_resume_keeps_picks_for_a_later_try():
     assert repo.recs and all(r.sent_at is None for r in repo.recs)
 
 
+def unsent(repo, days_ago: int):
+    run = SimpleNamespace(
+        id=uuid4(),
+        interests=["old"],
+        created_at=NOW - timedelta(days=days_ago, hours=10),
+    )
+    repo.runs.append(run)
+    post_id = uuid4()
+    repo.posts[post_id] = Post(
+        id=post_id, hn_id=900 + days_ago, title="Old", url="https://x.com/o", score=1
+    )
+    rec = SimpleNamespace(
+        id=uuid4(),
+        run_id=run.id,
+        post_id=post_id,
+        recommended_on=TODAY - timedelta(days=days_ago),
+        sent_at=None,
+        rank=1,
+    )
+    repo.recs.append(rec)
+    return rec
+
+
 @pytest.mark.asyncio
-async def test_unsent_picks_from_an_earlier_day_are_discarded_not_sent():
-    uc, repo, sender, _ = make(ranker=FakeRanker([5, 5, 5, 5, 5]))
-    repo.recs = [
-        SimpleNamespace(
-            id=uuid4(),
-            post_id=uuid4(),
-            recommended_on=TODAY - timedelta(days=1),
-            sent_at=None,
-            rank=1,
-        )
-    ]
+async def test_yesterdays_unsent_pick_is_resent_with_its_own_header():
+    uc, repo, sender, _ = make(ranker=FakeRanker([3, 3, 3, 3, 3]))
+    rec = unsent(repo, days_ago=1)
+
     await uc.run(USER, now=NOW)
 
-    assert all(r.recommended_on == TODAY for r in repo.recs)  # the stale one is gone
+    assert rec.sent_at is not None and 901 in [p[2] for p in sender.picks]
+    assert sender.headers[0] == (CHAT_ID, TOPIC_ID, 1, ["old"])
+
+
+@pytest.mark.asyncio
+async def test_unsent_picks_older_than_yesterday_are_discarded_not_sent():
+    uc, repo, sender, _ = make(ranker=FakeRanker([3, 3, 3, 3, 3]))
+    unsent(repo, days_ago=2)
+
+    await uc.run(USER, now=NOW)
+
+    assert repo.recs == [] and sender.picks == []
 
 
 @pytest.mark.asyncio

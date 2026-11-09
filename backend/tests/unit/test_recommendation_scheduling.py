@@ -7,10 +7,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.infrastructure.config.settings import settings
 from scripts import run_recommendations
-from scripts.run_scheduler import schedule_recommendations
+from scripts.run_scheduler import recommendation_hours, schedule_recommendations
 
 
-def fire_hours() -> dict[str, str]:
+def scheduled() -> dict[str, str]:
     scheduler = AsyncIOScheduler()
     schedule_recommendations(scheduler)
     return {
@@ -19,17 +19,21 @@ def fire_hours() -> dict[str, str]:
     }
 
 
-def test_retry_fires_an_hour_after_the_daily_run():
-    with patch.object(settings, "recommendation_hour", 8):
-        assert fire_hours() == {
-            "hn_pal_recommendations": "8",
-            "hn_pal_recommendations_retry": "9",
-        }
+def test_one_job_fires_at_each_listed_hour():
+    with patch.object(settings, "recommendation_hours", "8,12,16,20"):
+        assert scheduled() == {"hn_pal_recommendations": "8,12,16,20"}
 
 
-def test_no_retry_when_it_would_land_on_the_next_day():
-    with patch.object(settings, "recommendation_hour", 23):
-        assert fire_hours() == {"hn_pal_recommendations": "23"}
+def test_hours_are_sorted_and_deduplicated():
+    with patch.object(settings, "recommendation_hours", " 20, 8,8 ,12"):
+        assert recommendation_hours() == [8, 12, 20]
+
+
+@pytest.mark.parametrize("bad", ["", " , ", "24", "-1", "8;12"])
+def test_bad_hours_are_refused_at_startup(bad):
+    with patch.object(settings, "recommendation_hours", bad):
+        with pytest.raises(ValueError):
+            recommendation_hours()
 
 
 @pytest.mark.asyncio

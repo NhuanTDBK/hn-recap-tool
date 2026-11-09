@@ -138,11 +138,11 @@ The row is created on the next summarization run. To stop DM summaries and pushe
 
 In the group, the buttons act on the group's feed, so members do not need to run `/start`. Because the bot runs in privacy mode, a Discuss follow-up must be a **reply** to the bot's message.
 
-### Daily Recommendations
+### Recommendations
 
-To scroll less in the Streaming topic, the bot can send a short daily list of posts picked for you into a second topic of the same group.
+To scroll less in the Streaming topic, the bot can send short lists of posts picked for you into a second topic of the same group, several times a day.
 
-Once a day it reads what the group did in the feed: **Save** (strong yes), **👎 Not for me** (strong no), **More** (weak yes) and recommended posts nobody touched (weak no). One LLM call picks only the strong matches from the last day's posts. Each pick has a **💡 Why** button that shows the reason. The daily maximum is a ceiling, not a target: some days bring a few posts, none are padded.
+Each run reads what the group did in the feed: **Save** (strong yes), **👎 Not for me** (strong no), **More** (weak yes) and recommended posts nobody touched (weak no). One LLM call picks only the strong matches from the last day's posts. Each pick has a **💡 Why** button that shows the reason. The daily maximum is a ceiling, not a target: some days bring a few posts, none are padded.
 
 1. In the group, create a "Recommended" topic and copy its ID the same way as for the Streaming topic.
 2. Set in `.env` (see `.env.example` for all options): `RECOMMENDATION_ENABLED=true` and `TELEGRAM_RECOMMENDATION_TOPIC_ID=<TOPIC>`.
@@ -152,11 +152,20 @@ Once a day it reads what the group did in the feed: **Save** (strong yes), **�
 # Preview: one LLM call, nothing is written or sent. Shows signals, interests, picks and what the cut-off dropped.
 python scripts/run_recommendations.py --dry-run
 
-# Run now (does nothing if today already ran); --force runs again within the remaining daily cap
+# Run now (does nothing if the last run was under RECOMMENDATION_MIN_GAP_MINUTES ago); --force runs anyway, within the day's cap
 python scripts/run_recommendations.py
 ```
 
-The scheduler runs it daily at `RECOMMENDATION_HOUR:RECOMMENDATION_MINUTE` in `RECOMMENDATION_TIMEZONE` (default 08:30 Asia/Ho_Chi_Minh). An hour later a retry job resends any picks that failed to send, and does nothing if the first run finished. Picks still unsent at the end of the day are dropped. With fewer than `RECOMMENDATION_MIN_SAVES` saves it does nothing. If the model call fails or its reply cannot be parsed twice, it sends nothing and logs an error; it never falls back to "top by score".
+The scheduler runs it at each hour in `RECOMMENDATION_HOURS` (default `8,12,16,20`, so every 4 hours) at minute `RECOMMENDATION_MINUTE`, in `RECOMMENDATION_TIMEZONE` (default Asia/Ho_Chi_Minh). `RECOMMENDATION_MODEL` picks the ranking model, for example `deepseek-v4-pro`; the hourly summaries keep using `OPENAI_MODEL`.
+
+Runs do not repeat each other:
+- A run only looks at summaries newer than the last run, so a post the model passed over is not ranked again.
+- A post is never picked twice: earlier picks are left out, and the database rejects a repeat if two runs overlap.
+- `RECOMMENDATION_DAILY_MAX` counts all of a day's runs. When it is used up, a run stops before the LLM call.
+- A run under `RECOMMENDATION_MIN_GAP_MINUTES` after the last one does nothing, unless you pass `--force`.
+- Picks that failed to send are resent by the next run, under their own header. They are dropped after one more day.
+
+With fewer than `RECOMMENDATION_MIN_SAVES` saves it does nothing. If the model call fails or its reply cannot be parsed twice, it sends nothing, logs an error, and the next run covers the same posts; it never falls back to "top by score".
 
 ## Architecture
 

@@ -170,3 +170,15 @@ async def test_rank_wraps_a_failed_model_call_and_keeps_earlier_spend():
         await rank_candidates(TasteSignals(), [brief(5)])
     assert not isinstance(err.value, RankingParseError)
     assert (err.value.input_tokens, err.value.output_tokens) == (100, 10)
+
+
+@pytest.mark.asyncio
+async def test_rank_uses_the_model_it_is_given():
+    good = reply({"hn_id": 5, "fit": 5, "reason": "r"})
+    create = MagicMock(return_value=MagicMock())
+    with (
+        patch.object(agent_mod.Runner, "run", AsyncMock(return_value=fake_run(good))),
+        patch.object(agent_mod, "create_recommendation_agent", create),
+    ):
+        await rank_candidates(TasteSignals(), [brief(5)], model="deepseek-v4-pro")
+    create.assert_called_once_with("deepseek-v4-pro")

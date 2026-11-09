@@ -1,18 +1,19 @@
 #!/usr/bin/env python
-"""CLI script for the daily recommendations: picks learned from the group's saves.
+"""CLI script for the recommendations: picks learned from the group's saves.
 
-Reads the group's Save / "Not for me" / More taps, asks the model which of the last
-day's posts the reader would want, and sends only the strong matches (never more than
-RECOMMENDATION_DAILY_MAX) to their own forum topic.
+Reads the group's Save / "Not for me" / More taps, asks the model which posts summarized
+since the last run the reader would want, and sends only the strong matches (never more
+than RECOMMENDATION_DAILY_MAX in a day) to their own forum topic. The scheduler runs it
+several times a day.
 
 Usage:
     # Preview: one LLM call, nothing is written or sent
     python scripts/run_recommendations.py --dry-run
 
-    # Real run (does nothing if today already ran)
+    # Real run (does nothing if the last run was under the minimum gap ago)
     python scripts/run_recommendations.py
 
-    # Run again today, within the remaining daily cap
+    # Run anyway, still within the day's remaining cap
     python scripts/run_recommendations.py --force
 """
 
@@ -21,6 +22,7 @@ import asyncio
 import logging
 import sys
 from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path
 
 # Add project root to path
@@ -144,11 +146,11 @@ async def main_async(dry_run: bool = False, force: bool = False) -> dict:
                 await bot_manager.initialize()
                 sender = RecommendationDeliveryHandler(bot_manager)
 
-            model = agent_settings.openai_model
+            model = settings.recommendation_model or agent_settings.openai_model
             use_case = DailyRecommendationUseCase(
                 repo=PostgresRecommendationRepository(session),
                 sender=sender,
-                ranker=rank_candidates,
+                ranker=partial(rank_candidates, model=model),
                 model=model,
                 usage_logger=make_usage_logger(session_factory, user.id, model),
             )
@@ -167,7 +169,7 @@ def main() -> None:
         "--dry-run", action="store_true", help="Rank and report; write and send nothing"
     )
     parser.add_argument(
-        "--force", action="store_true", help="Run again even if today already ran"
+        "--force", action="store_true", help="Run even if the last run was very recent"
     )
     args = parser.parse_args()
 
