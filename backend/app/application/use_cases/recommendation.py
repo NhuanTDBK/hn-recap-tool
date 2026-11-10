@@ -50,10 +50,6 @@ UsageLogger = Callable[..., Awaitable[None]]
 class RecommendationSender(Protocol):
     """What the use case needs from the Telegram side."""
 
-    async def send_header(
-        self, chat_id: int, topic_id: int | None, count: int, interests: list[str]
-    ) -> int: ...
-
     async def send_pick(
         self,
         chat_id: int,
@@ -100,6 +96,7 @@ class DailyRecommendationUseCase:
         *,
         dry_run: bool = False,
         force: bool = False,
+        since: datetime | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """Run one recommendation slot.
@@ -108,6 +105,7 @@ class DailyRecommendationUseCase:
             user: The feed to recommend for (the group's subscriber row)
             dry_run: Rank and report, but write and send nothing
             force: Run even if the last run was under the minimum gap ago
+            since: Backfill: take candidates from here instead of the last run's start
             now: Current time (for tests)
 
         Returns:
@@ -200,9 +198,12 @@ class DailyRecommendationUseCase:
 
         # Only summaries newer than the last run: posts the model already rated and
         # passed over are not paid for again. The lookback bounds it after a long gap.
-        cutoff = now - timedelta(hours=settings.recommendation_lookback_hours)
-        if last_run_at is not None:
-            cutoff = max(cutoff, last_run_at)
+        if since is not None:
+            cutoff = since
+        else:
+            cutoff = now - timedelta(hours=settings.recommendation_lookback_hours)
+            if last_run_at is not None:
+                cutoff = max(cutoff, last_run_at)
         candidates = await self.repo.get_candidates(user.id, cutoff, CANDIDATE_LIMIT)
         stats["candidate_count"] = len(candidates)
         if not candidates:
@@ -267,7 +268,7 @@ class DailyRecommendationUseCase:
             stats["status"] = "no_picks"
             return stats
 
-        await self._send(user, rows, (len(rows), result.interests), stats)
+        await self._send(user, rows, stats)
         stats["status"] = "sent" if stats["sent"] else "send_failed"
         return stats
 
@@ -276,19 +277,13 @@ class DailyRecommendationUseCase:
     async def _resend(
         self, user: User, pending: list[Recommendation], stats: dict[str, Any]
     ) -> None:
-        """Resend unsent picks one run at a time, each run's batch under its own header.
-
-        A run whose header already went out (some picks were sent) gets no second one.
-        """
+        """Resend unsent picks, oldest run first."""
         by_run: dict[Any, list[Recommendation]] = {}
         for rec in pending:
             by_run.setdefault(rec.run_id, []).append(rec)
 
-        for run_id, rows in by_run.items():
-            header = None
-            if await self.repo.count_sent_in_run(run_id) == 0:
-                header = (len(rows), await self.repo.get_run_interests(run_id))
-            await self._send(user, rows, header, stats)
+        for rows in by_run.values():
+            await self._send(user, rows, stats)
 
     @staticmethod
     def _select(picks: list[RankedPick]) -> tuple[list[RankedPick], list[RankedPick]]:
@@ -344,7 +339,6 @@ class DailyRecommendationUseCase:
         self,
         user: User,
         rows: list[Recommendation],
-        header: tuple[int, list[str]] | None,
         stats: dict[str, Any],
     ) -> None:
         """Send picks one by one, marking each sent as soon as Telegram accepts it.
@@ -357,19 +351,6 @@ class DailyRecommendationUseCase:
         loaded = await self.repo.get_posts_with_summaries(
             user.id, [r.post_id for r in rows]
         )
-
-        if header is not None:
-            try:
-                await self.sender.send_header(
-                    user.telegram_id, topic_id, header[0], header[1]
-                )
-            except Exception as e:
-                logger.error(
-                    f"Could not send the recommendations header; leaving picks unsent: {e}"
-                )
-                stats["failed"] += len(rows)
-                return
-            await asyncio.sleep(self.message_delay_seconds)
 
         total = len(rows)
         for position, rec in enumerate(rows, 1):

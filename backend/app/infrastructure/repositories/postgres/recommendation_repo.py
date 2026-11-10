@@ -215,25 +215,12 @@ class PostgresRecommendationRepository:
         )
         return int((await self.session.execute(stmt)).scalar_one())
 
-    async def count_sent_in_run(self, run_id: UUID) -> int:
-        """Count picks of one run that already reached Telegram."""
-        stmt = select(func.count(Recommendation.id)).where(
-            Recommendation.run_id == run_id,
-            Recommendation.sent_at.isnot(None),
-        )
-        return int((await self.session.execute(stmt)).scalar_one())
-
     async def get_last_run_at(self, user_id: int) -> datetime | None:
         """Return when the newest run for this feed started, or None if none ran."""
         stmt = select(func.max(RecommendationRun.created_at)).where(
             RecommendationRun.user_id == user_id
         )
         return (await self.session.execute(stmt)).scalar_one_or_none()
-
-    async def get_run_interests(self, run_id: UUID) -> list[str]:
-        """Return the interests the model inferred in one run."""
-        stmt = select(RecommendationRun.interests).where(RecommendationRun.id == run_id)
-        return list((await self.session.execute(stmt)).scalar_one_or_none() or [])
 
     async def create_run(
         self,

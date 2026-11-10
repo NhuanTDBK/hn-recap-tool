@@ -22,8 +22,10 @@ import asyncio
 import logging
 import sys
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from functools import partial
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -115,12 +117,15 @@ def make_usage_logger(
     return usage_logger
 
 
-async def main_async(dry_run: bool = False, force: bool = False) -> dict:
+async def main_async(
+    dry_run: bool = False, force: bool = False, since: datetime | None = None
+) -> dict:
     """Run today's recommendations once.
 
     Args:
         dry_run: Rank and report, but write and send nothing
         force: Run again even if today already has a run
+        since: Backfill: take candidates from here instead of the last run's start
 
     Returns:
         Stats dict from the use case; ``status`` says what happened
@@ -154,7 +159,7 @@ async def main_async(dry_run: bool = False, force: bool = False) -> dict:
                 model=model,
                 usage_logger=make_usage_logger(session_factory, user.id, model),
             )
-            stats = await use_case.run(user, dry_run=dry_run, force=force)
+            stats = await use_case.run(user, dry_run=dry_run, force=force, since=since)
             _print_report(stats)
             return stats
     finally:
@@ -171,9 +176,21 @@ def main() -> None:
     parser.add_argument(
         "--force", action="store_true", help="Run even if the last run was very recent"
     )
+    parser.add_argument(
+        "--since",
+        metavar="YYYY-MM-DD",
+        help="Backfill: take candidates from the start of this local date "
+        "instead of the last run's start",
+    )
     args = parser.parse_args()
 
-    stats = asyncio.run(main_async(dry_run=args.dry_run, force=args.force))
+    since = None
+    if args.since:
+        since = datetime.strptime(args.since, "%Y-%m-%d").replace(
+            tzinfo=ZoneInfo(settings.recommendation_timezone)
+        )
+
+    stats = asyncio.run(main_async(dry_run=args.dry_run, force=args.force, since=since))
     sys.exit(1 if stats.get("status") in FAILURE_STATUSES else 0)
 
 

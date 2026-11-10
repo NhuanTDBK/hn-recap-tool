@@ -17,19 +17,19 @@ The model acts like a personal editor with a clippings folder: saved posts are e
 
 - If a post has both a Save and a Not for me tap, the newer tap wins.
 - 💡 Why only counts as engagement. It does not change the verdict.
-- The model returns a **fit** from 3 to 5 per post and the interests it inferred. Code keeps `fit >= RECOMMENDATION_MIN_FIT` (4), sorts best first, and cuts to the day's remaining room (if a cap is set).
+- The model returns a **fit** from 3 to 5 per post and the interests it inferred. Code keeps `fit >= RECOMMENDATION_MIN_FIT` (3, so everything the model returns), sorts best first, and cuts to the day's remaining room (if a cap is set).
 - There is **no daily limit** by default (`RECOMMENDATION_DAILY_MAX=0`). Set it above 0 to add a ceiling. Either way a quiet day sends few posts, and nothing is padded.
 - If the model's reply cannot be parsed twice, the run sends nothing. There is no fallback to "top by score".
 
 ## One run
 
-1. Resend unsent picks from earlier runs (up to one day old), each batch under its own header.
+1. Resend unsent picks from earlier runs (up to one day old).
 2. Stop with `too_soon` if the last run started under `RECOMMENDATION_MIN_GAP_MINUTES` ago (unless `--force`).
 3. If `RECOMMENDATION_DAILY_MAX` is above 0, stop with `daily_cap_reached` when the day already has that many picks. No LLM call is made.
 4. Stop with `too_few_saves` if there are under `RECOMMENDATION_MIN_SAVES` saves.
 5. Load candidates: summaries for this feed newer than the last run (at most `RECOMMENDATION_LOOKBACK_HOURS` back), live crawled stories, not already saved, rejected or recommended. At most 150, highest score first.
 6. One LLM call ranks them.
-7. Store the run and picks, then send a header and each pick, marking each sent as Telegram accepts it.
+7. Store the run and picks, then send each pick (there is no header message), marking each sent as Telegram accepts it.
 
 ### Why posts are not repeated
 
@@ -69,7 +69,7 @@ All in `backend/.env`; see `backend/.env.example`.
 | `TELEGRAM_RECOMMENDATION_TOPIC_ID` | unset | Forum topic for the picks. Unset means nothing is sent |
 | `RECOMMENDATION_MODEL` | unset | Ranking model. Unset uses `OPENAI_MODEL`. Production uses `deepseek-v4-pro` |
 | `RECOMMENDATION_DAILY_MAX` | `0` | Optional ceiling per local day, across all runs. `0` = no limit |
-| `RECOMMENDATION_MIN_FIT` | `4` | Lowest fit that is sent |
+| `RECOMMENDATION_MIN_FIT` | `3` | Lowest fit that is sent |
 | `RECOMMENDATION_HOURS` | `8,12,16,20` | Local hours the job fires |
 | `RECOMMENDATION_MINUTE` | `30` | Minute of each hour |
 | `RECOMMENDATION_MIN_GAP_MINUTES` | `120` | A run this soon after the last does nothing |
@@ -89,6 +89,10 @@ All in `backend/.env`; see `backend/.env.example`.
 
 # Run anyway, still within the day's cap (if set)
 .venv/bin/python backend/scripts/run_recommendations.py --force
+
+# Backfill: take candidates from a local date (e.g. the first day), not the last run's start
+.venv/bin/python backend/scripts/run_recommendations.py --since 2026-11-09
+.venv/bin/python backend/scripts/run_recommendations.py --force
 ```
 
 The exit code is 1 for `ranking_failed`, `send_failed`, `no_topic` and `no_group`.
@@ -106,7 +110,7 @@ On the VM a ranking call takes about 3 minutes with the Pro model. Run it detach
 | `app/infrastructure/agents/recommendation_agent.py` | Prompt input, JSON parsing, the LLM call with one retry |
 | `app/infrastructure/prompts/recommendation_system.md` | System prompt (static, so it caches) |
 | `app/infrastructure/repositories/postgres/recommendation_repo.py` | Queries and conflict-safe insert |
-| `app/presentation/bot/handlers/recommendation_delivery.py` | Sends the header and picks |
+| `app/presentation/bot/handlers/recommendation_delivery.py` | Sends the picks |
 | `scripts/run_recommendations.py` | CLI and the function the scheduler calls |
 | `scripts/run_scheduler.py` | `schedule_recommendations` registers the cron job |
 

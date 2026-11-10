@@ -159,24 +159,6 @@ class DigestMessageFormatter:
 
         return message
 
-    def format_recommendation_header(self, count: int, interests: list[str]) -> str:
-        """Format the message that opens a day's recommendations.
-
-        Args:
-            count: Number of picks that follow
-            interests: Interests the model inferred, most important first
-
-        Returns:
-            Header text (HTML)
-        """
-        noun = "pick" if count == 1 else "picks"
-        lines = [f"💡 <b>Recommended for you</b> — {count} {noun}"]
-        if interests:
-            joined = ", ".join(self._escape_html(i) for i in interests)
-            lines.append(f"\nBased on your saves: {joined}")
-        lines.append("\nTap 💡 Why for the reason. Tap 👎 Not for me to teach it what to skip.")
-        return "\n".join(lines)
-
     def format_recommendation_message(
         self,
         post: Post,

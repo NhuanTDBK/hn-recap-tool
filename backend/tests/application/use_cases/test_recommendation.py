@@ -107,12 +107,6 @@ class FakeRepo:
     async def count_for_day(self, user_id, day):
         return sum(1 for r in self.recs if r.recommended_on == day)
 
-    async def count_sent_in_run(self, run_id):
-        return sum(1 for r in self.recs if r.run_id == run_id and r.sent_at is not None)
-
-    async def get_run_interests(self, run_id):
-        return next((r.interests for r in self.runs if r.id == run_id), [])
-
     async def create_run(
         self,
         user_id,
@@ -165,19 +159,10 @@ class FakeRepo:
 
 
 class FakeSender:
-    def __init__(self, fail_hn_ids=(), fail_header=False):
-        self.headers: list = []
+    def __init__(self, fail_hn_ids=()):
         self.picks: list = []
         self.fail_hn_ids = set(fail_hn_ids)
-        self.fail_header = fail_header
         self._next = 500
-
-    async def send_header(self, chat_id, topic_id, count, interests):
-        if self.fail_header:
-            raise RuntimeError("telegram down")
-        self.headers.append((chat_id, topic_id, count, interests))
-        self._next += 1
-        return self._next
 
     async def send_pick(self, chat_id, topic_id, post, summary, position, total):
         if post.hn_id in self.fail_hn_ids:
@@ -259,13 +244,31 @@ async def test_sends_only_picks_meeting_the_fit_cutoff():
 
 
 @pytest.mark.asyncio
-async def test_header_sent_once_with_count_and_interests_into_the_topic():
-    uc, _, sender, _ = make(ranker=FakeRanker([5, 5], interests=["rust", "databases"]))
+async def test_picks_go_into_the_topic_with_no_header_message():
+    uc, _, sender, _ = make(ranker=FakeRanker([5, 5], interests=["rust"]))
     await uc.run(USER, now=NOW)
 
-    assert sender.headers == [(CHAT_ID, TOPIC_ID, 2, ["rust", "databases"])]
     assert all(p[0] == CHAT_ID and p[1] == TOPIC_ID for p in sender.picks)
     assert [(p[3], p[4]) for p in sender.picks] == [(1, 2), (2, 2)]
+    assert not hasattr(sender, "headers")
+
+
+@pytest.mark.asyncio
+async def test_since_overrides_the_last_run_for_a_backfill():
+    uc, repo, sender, _ = make(ranker=FakeRanker([5, 5, 5, 5, 5]))
+    repo.runs.append(SimpleNamespace(id=uuid4(), created_at=NOW - timedelta(hours=5)))
+    seen = {}
+    real = repo.get_candidates
+
+    async def spy(user_id, cutoff, limit):
+        seen["cutoff"] = cutoff
+        return await real(user_id, cutoff, limit)
+
+    repo.get_candidates = spy
+    since = NOW - timedelta(days=2)
+    await uc.run(USER, now=NOW, since=since)
+
+    assert seen["cutoff"] == since
 
 
 @pytest.mark.asyncio
@@ -303,7 +306,7 @@ async def test_nothing_qualifying_sends_nothing_but_still_records_the_run():
     stats = await uc.run(USER, now=NOW)
 
     assert stats["status"] == "no_picks"
-    assert sender.headers == [] and sender.picks == []
+    assert sender.picks == []
     assert len(repo.runs) == 1  # so the next run starts after these posts
 
     again = await uc.run(USER, now=NOW)
@@ -413,7 +416,7 @@ async def test_an_overlapping_run_cannot_make_a_post_go_out_twice():
     await uc.run(USER, now=NOW)
 
     assert 100 not in [p[2] for p in sender.picks]  # the other run owns it
-    assert len(sender.picks) == 4 and sender.headers[0][2] == 4
+    assert len(sender.picks) == 4
 
 
 @pytest.mark.asyncio
@@ -551,16 +554,7 @@ async def test_one_failed_pick_does_not_stop_the_rest_and_stays_unsent():
 
 
 @pytest.mark.asyncio
-async def test_header_failure_leaves_every_pick_unsent():
-    uc, repo, sender, _ = make(sender=FakeSender(fail_header=True))
-    stats = await uc.run(USER, now=NOW)
-
-    assert stats["status"] == "send_failed" and stats["sent"] == 0
-    assert sender.picks == [] and all(r.sent_at is None for r in repo.recs)
-
-
-@pytest.mark.asyncio
-async def test_unsent_picks_resume_without_llm_or_header_and_never_exceed_the_cap():
+async def test_unsent_picks_resume_without_llm_and_never_exceed_the_cap():
     uc, repo, sender, ranker = make(sender=FakeSender(fail_hn_ids={101}))
     await uc.run(USER, now=NOW)  # 101 fails and stays pending
     assert len(await repo.get_pending(7, TODAY)) == 1
@@ -570,36 +564,7 @@ async def test_unsent_picks_resume_without_llm_or_header_and_never_exceed_the_ca
 
     assert stats["status"] == "resumed" and stats["sent"] == 1
     assert ranker.calls == 1  # no second LLM call
-    assert len(sender.headers) == 1  # no second header
     assert len(repo.recs) == 4 and all(r.sent_at for r in repo.recs)
-
-
-@pytest.mark.asyncio
-async def test_resume_after_a_failed_header_sends_the_header_without_llm():
-    uc, repo, sender, ranker = make(
-        sender=FakeSender(fail_header=True),
-        ranker=FakeRanker([5, 5, 3, 3, 3], interests=["rust"]),
-    )
-    await uc.run(USER, now=NOW)
-    assert sender.headers == [] and sender.picks == []
-
-    sender.fail_header = False
-    stats = await uc.run(USER, now=NOW)
-
-    assert stats["status"] == "resumed" and stats["sent"] == 2
-    assert sender.headers == [(CHAT_ID, TOPIC_ID, 2, ["rust"])]
-    assert ranker.calls == 1 and all(r.sent_at for r in repo.recs)
-
-
-@pytest.mark.asyncio
-async def test_header_failing_again_on_resume_keeps_picks_for_a_later_try():
-    uc, repo, sender, _ = make(sender=FakeSender(fail_header=True))
-    await uc.run(USER, now=NOW)
-
-    stats = await uc.run(USER, now=NOW)
-
-    assert stats["status"] == "send_failed" and sender.picks == []
-    assert repo.recs and all(r.sent_at is None for r in repo.recs)
 
 
 def unsent(repo, days_ago: int):
@@ -626,14 +591,13 @@ def unsent(repo, days_ago: int):
 
 
 @pytest.mark.asyncio
-async def test_yesterdays_unsent_pick_is_resent_with_its_own_header():
+async def test_yesterdays_unsent_pick_is_resent():
     uc, repo, sender, _ = make(ranker=FakeRanker([3, 3, 3, 3, 3]))
     rec = unsent(repo, days_ago=1)
 
     await uc.run(USER, now=NOW)
 
     assert rec.sent_at is not None and 901 in [p[2] for p in sender.picks]
-    assert sender.headers[0] == (CHAT_ID, TOPIC_ID, 1, ["old"])
 
 
 @pytest.mark.asyncio

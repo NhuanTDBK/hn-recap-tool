@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     telegram_recommendation_topic_id: Optional[int] = None  # forum topic for the picks
     recommendation_model: Optional[str] = None  # model for ranking; None = the app-wide OPENAI_MODEL
     recommendation_daily_max: int = 0  # optional ceiling per day across all runs; 0 = no limit
-    recommendation_min_fit: int = 4  # the model rates each pick 1-5; lower scores are dropped
+    recommendation_min_fit: int = 3  # the model rates each pick 3-5; lower scores are dropped (3 = send everything it returns)
     recommendation_hours: str = "8,12,16,20"  # local hours the job fires, every 4h by default
     recommendation_minute: int = 30
     recommendation_min_gap_minutes: int = 120  # skip a run this soon after the last (stops double-fires)

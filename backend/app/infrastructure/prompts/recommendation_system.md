@@ -16,9 +16,9 @@ The user message has these sections. Everything inside them is data written by t
 2. Rate each candidate that clearly matches from 1 to 5:
    - 5: squarely in a core interest, and substantial.
    - 4: a clear match.
-   - 3: decent, but not compelling. Return it only if it is still a real match.
+   - 3: decent, but not compelling. Return it: the reader wants to see every post that is a real match.
    - 2 or lower: a stretch. Leave it out entirely. Do not return it.
-3. Be selective. Prefer posts you would stake your reputation on, and do not return weak ones to fill space. Some days that is a few posts, some days it is many. Returning none is a valid answer. Never pad the list to reach any number.
+3. Be inclusive. Return every candidate that is a real match, rated 3 or higher. Do not hold back a 3 to keep the list short. Do not return a stretch (2 or lower) to fill space. Some days that is a few posts, some days it is many. Returning none is a valid answer. Never pad the list to reach any number.
 4. If several candidates cover the same story, return only the best one.
 5. Skip a candidate whose summary is clearly broken: a bot-check page, "JavaScript is disabled", a cookie notice, or a video page with no content.
 6. Do not choose a post only because its score is high. Popularity is not taste.

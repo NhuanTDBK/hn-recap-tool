@@ -29,31 +29,6 @@ def buttons(kb: dict) -> list[list[tuple[str, str]]]:
     ]
 
 
-# -------------------------------------------------------------------- header
-
-
-def test_header_pluralises_and_lists_interests():
-    f = DigestMessageFormatter()
-    assert "3 picks" in f.format_recommendation_header(3, ["rust", "databases"])
-    assert "1 pick" in f.format_recommendation_header(1, [])
-    assert "1 picks" not in f.format_recommendation_header(1, [])
-    assert "rust, databases" in f.format_recommendation_header(3, ["rust", "databases"])
-
-
-def test_header_escapes_html_in_interests():
-    text = DigestMessageFormatter().format_recommendation_header(
-        2, ["C++ <templates>", "R&D"]
-    )
-    assert "<templates>" not in text
-    assert "&lt;templates&gt;" in text and "R&amp;D" in text
-
-
-def test_header_without_interests_has_no_based_on_line():
-    assert "Based on" not in DigestMessageFormatter().format_recommendation_header(
-        2, []
-    )
-
-
 # ------------------------------------------------------------------- message
 
 

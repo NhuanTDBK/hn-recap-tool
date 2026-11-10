@@ -31,28 +31,6 @@ class RecommendationDeliveryHandler:
         self.formatter = DigestMessageFormatter()
         self.keyboard_builder = InlineKeyboardBuilder()
 
-    async def send_header(
-        self,
-        chat_id: int,
-        topic_id: int | None,
-        count: int,
-        interests: list[str],
-    ) -> int:
-        """Send the message that opens a day's picks.
-
-        Returns:
-            Telegram message ID
-
-        Raises:
-            Exception: If the send fails
-        """
-        result = await self.bot_manager.send_message(
-            chat_id=chat_id,
-            text=self.formatter.format_recommendation_header(count, interests),
-            message_thread_id=topic_id,
-        )
-        return result["message_id"]
-
     async def send_pick(
         self,
         chat_id: int,
