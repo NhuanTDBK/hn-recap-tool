@@ -6,6 +6,8 @@ Pipeline steps (sequential):
   2. crawl    — extract content from URLs → RocksDB
   3. summarize — AI summarization → PostgreSQL
   4. deliver   — send summaries to users via Telegram
+  5. recommend — send picks learned from saves to their own topic (when
+                 RECOMMENDATION_ENABLED=true), on the same hourly schedule
 
 Each step is called from its existing script module. One APScheduler trigger
 (CronTrigger minute=0) fires the whole pipeline. Individual steps fail
@@ -46,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 async def pipeline() -> None:
-    """Run all 4 pipeline steps sequentially."""
+    """Run all pipeline steps sequentially."""
     logger.info("=" * 60)
     logger.info("HN PAL PIPELINE — START")
     logger.info("=" * 60)
@@ -110,77 +112,31 @@ async def pipeline() -> None:
     except Exception:
         logger.exception("[4/4] Delivery failed")
 
+    # Step 5: Recommend (after delivery, so it sees this hour's new summaries)
+    if settings.recommendation_enabled:
+        await recommend_step()
+
     logger.info("=" * 60)
     logger.info("HN PAL PIPELINE — DONE")
     logger.info("=" * 60)
 
 
-async def recommendations_job() -> None:
-    """Send the day's recommended posts. Independent of the hourly pipeline."""
-    logger.info("Recommendations — START")
+async def recommend_step() -> None:
+    """Send the new hour's recommended posts. A failure here never fails the pipeline."""
+    logger.info("[5/5] Recommending posts...")
     try:
-        stats = await recommend()
+        # force: the pipeline fires hourly, under the CLI's minimum gap between runs.
+        stats = await recommend(force=True)
     except Exception:
-        logger.exception("Recommendations — crashed")
+        logger.exception("[5/5] Recommendations crashed")
         return
     status = stats.get("status")
     logger.log(
         logging.ERROR if status in RECOMMENDATION_FAILURES else logging.INFO,
-        "Recommendations — %s (sent=%s, failed=%s)",
+        "[5/5] Recommendations — %s (sent=%s, failed=%s)",
         status,
         stats.get("sent", 0),
         stats.get("failed", 0),
-    )
-
-
-def recommendation_hours() -> list[int]:
-    """Parse RECOMMENDATION_HOURS (e.g. "8,12,16,20") into sorted local hours.
-
-    Raises:
-        ValueError: If it is empty or holds anything but whole hours 0-23
-    """
-    hours = sorted(
-        {int(h) for h in settings.recommendation_hours.split(",") if h.strip()}
-    )
-    if not hours or not all(0 <= h <= 23 for h in hours):
-        raise ValueError(
-            f"RECOMMENDATION_HOURS must list hours 0-23, got {settings.recommendation_hours!r}"
-        )
-    return hours
-
-
-def schedule_recommendations(scheduler: AsyncIOScheduler) -> None:
-    """Register the recommendations job, firing at each of RECOMMENDATION_HOURS.
-
-    A run only looks at summaries newer than the last run, resends picks an earlier
-    send left unsent, and stops once the day's cap is used, so the slots do not repeat
-    each other's work.
-
-    Args:
-        scheduler: Scheduler to add the job to
-    """
-    hours = recommendation_hours()
-    scheduler.add_job(
-        recommendations_job,
-        trigger=CronTrigger(
-            hour=",".join(str(h) for h in hours),
-            minute=settings.recommendation_minute,
-            timezone=settings.recommendation_timezone,
-        ),
-        id="hn_pal_recommendations",
-        name="HN Pal Recommendations",
-        max_instances=1,
-        coalesce=True,
-        # Shares an event loop with the hourly pipeline; the default grace of 1s
-        # would silently skip a slot if the loop is busy at fire time.
-        misfire_grace_time=1800,
-        replace_existing=True,
-    )
-    logger.info(
-        "Recommendations enabled — fires at %s :%02d %s",
-        ",".join(f"{h:02d}" for h in hours),
-        settings.recommendation_minute,
-        settings.recommendation_timezone,
     )
 
 
@@ -204,10 +160,11 @@ async def main() -> None:
         max_instances=1,
         replace_existing=True,
     )
-    if settings.recommendation_enabled:
-        schedule_recommendations(scheduler)
     scheduler.start()
-    logger.info("Scheduler started — pipeline fires every hour at :00 UTC")
+    logger.info(
+        "Scheduler started — pipeline fires every hour at :00 UTC (recommendations: %s)",
+        "on" if settings.recommendation_enabled else "off",
+    )
 
     await stop_event.wait()
     scheduler.shutdown(wait=False)

@@ -103,7 +103,7 @@ python scripts/run_bot.py                        # Start Telegram bot
 1. **Ingest Pipeline**: HN API → PostgreSQL + RocksDB (hourly)
 2. **Summarization Pipeline**: Posts → OpenAI Agents → Summaries (every 30 min)
 3. **Delivery Pipeline**: Summaries → Telegram Bot → Users (scheduled)
-4. **Recommendation Pipeline**: Saves + new summaries → OpenAI Agent → picks in their own forum topic (4×/day, see [docs/recommendations.md](docs/recommendations.md))
+4. **Recommendation Pipeline**: Saves + new summaries → OpenAI Agent → picks in their own forum topic (hourly, see [docs/recommendations.md](docs/recommendations.md))
 5. **Discussion Flow**: User ↔ Bot ↔ OpenAI (future)
 
 ## AI Agents
@@ -334,7 +334,7 @@ Schedule these scripts:
 - `trigger_posts_collection.py` - Hourly (collect HN posts)
 - `run_personalized_summarization.py` - Every 30 min (generate summaries)
 - `run_delivery_pipeline.py` - User-scheduled (deliver summaries)
-- `run_recommendations.py` - Registered by `run_scheduler.py` at `RECOMMENDATION_HOURS` (default 08:30, 12:30, 16:30, 20:30 UTC+7) when `RECOMMENDATION_ENABLED=true`; do not add a separate cron
+- `run_recommendations.py` - Runs as step 5 of the hourly pipeline in `run_scheduler.py` (same schedule as the summaries) when `RECOMMENDATION_ENABLED=true`; do not add a separate cron
 
 ## Contributing
 

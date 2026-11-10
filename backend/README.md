@@ -158,7 +158,7 @@ python scripts/run_recommendations.py --dry-run
 python scripts/run_recommendations.py
 ```
 
-The scheduler runs it at each hour in `RECOMMENDATION_HOURS` (default `8,12,16,20`, so every 4 hours) at minute `RECOMMENDATION_MINUTE`, in `RECOMMENDATION_TIMEZONE` (default Asia/Ho_Chi_Minh). `RECOMMENDATION_MODEL` picks the ranking model, for example `deepseek-v4-pro`; the hourly summaries keep using `OPENAI_MODEL`.
+The scheduler runs it as the last step of the hourly pipeline, right after the summaries are delivered. `RECOMMENDATION_TIMEZONE` (default Asia/Ho_Chi_Minh) sets the day boundary. `RECOMMENDATION_MODEL` picks the ranking model, for example `deepseek-v4-pro`; the hourly summaries keep using `OPENAI_MODEL`.
 
 Runs do not repeat each other:
 - A run only looks at summaries newer than the last run, so a post the model passed over is not ranked again.

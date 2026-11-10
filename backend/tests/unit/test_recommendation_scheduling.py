@@ -1,39 +1,27 @@
-"""Tests for how the recommendation job is scheduled and how it records usage."""
+"""Tests for the recommend step in the hourly pipeline and how usage is recorded."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.infrastructure.config.settings import settings
-from scripts import run_recommendations
-from scripts.run_scheduler import recommendation_hours, schedule_recommendations
+from scripts import run_recommendations, run_scheduler
 
 
-def scheduled() -> dict[str, str]:
-    scheduler = AsyncIOScheduler()
-    schedule_recommendations(scheduler)
-    return {
-        job.id: str(job.trigger.fields[job.trigger.FIELD_NAMES.index("hour")])
-        for job in scheduler.get_jobs()
-    }
+@pytest.mark.asyncio
+async def test_step_forces_the_run_so_the_hourly_gap_guard_cannot_skip_it():
+    recommend = AsyncMock(return_value={"status": "sent", "sent": 3, "failed": 0})
+    with patch.object(run_scheduler, "recommend", recommend):
+        await run_scheduler.recommend_step()
+
+    recommend.assert_awaited_once_with(force=True)
 
 
-def test_one_job_fires_at_each_listed_hour():
-    with patch.object(settings, "recommendation_hours", "8,12,16,20"):
-        assert scheduled() == {"hn_pal_recommendations": "8,12,16,20"}
-
-
-def test_hours_are_sorted_and_deduplicated():
-    with patch.object(settings, "recommendation_hours", " 20, 8,8 ,12"):
-        assert recommendation_hours() == [8, 12, 20]
-
-
-@pytest.mark.parametrize("bad", ["", " , ", "24", "-1", "8;12"])
-def test_bad_hours_are_refused_at_startup(bad):
-    with patch.object(settings, "recommendation_hours", bad):
-        with pytest.raises(ValueError):
-            recommendation_hours()
+@pytest.mark.asyncio
+async def test_step_swallows_a_crash():
+    with patch.object(
+        run_scheduler, "recommend", AsyncMock(side_effect=RuntimeError("boom"))
+    ):
+        await run_scheduler.recommend_step()  # must not raise
 
 
 @pytest.mark.asyncio

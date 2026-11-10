@@ -2,7 +2,7 @@
 
 Picks posts the reader is likely to want, learned from what they **Save**, and sends them to their own forum topic. The goal is to scroll less in the Streaming topic, which stays unchanged.
 
-The job runs several times a day (default 08:30, 12:30, 16:30, 20:30 in Asia/Ho_Chi_Minh). Each run makes one LLM call.
+The job runs every hour as the last step of the pipeline, right after the summaries are delivered, so it follows the same schedule as the summaries (:00 UTC). Each run makes one LLM call, and each run only ranks the posts summarized since the last one.
 
 ## How it picks
 
@@ -24,7 +24,7 @@ The model acts like a personal editor with a clippings folder: saved posts are e
 ## One run
 
 1. Resend unsent picks from earlier runs (up to one day old).
-2. Stop with `too_soon` if the last run started under `RECOMMENDATION_MIN_GAP_MINUTES` ago (unless `--force`).
+2. Stop with `too_soon` if the last run started under `RECOMMENDATION_MIN_GAP_MINUTES` ago (unless `--force`). The pipeline always passes force, so the hourly run is never skipped by this.
 3. If `RECOMMENDATION_DAILY_MAX` is above 0, stop with `daily_cap_reached` when the day already has that many picks. No LLM call is made.
 4. Stop with `too_few_saves` if there are under `RECOMMENDATION_MIN_SAVES` saves.
 5. Load candidates: summaries for this feed newer than the last run (at most `RECOMMENDATION_LOOKBACK_HOURS` back), live crawled stories, not already saved, rejected or recommended. At most 150, highest score first.
@@ -65,15 +65,13 @@ All in `backend/.env`; see `backend/.env.example`.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `RECOMMENDATION_ENABLED` | `false` | Registers the scheduler job |
+| `RECOMMENDATION_ENABLED` | `false` | Adds the recommend step to the hourly pipeline |
 | `TELEGRAM_RECOMMENDATION_TOPIC_ID` | unset | Forum topic for the picks. Unset means nothing is sent |
 | `RECOMMENDATION_MODEL` | unset | Ranking model. Unset uses `OPENAI_MODEL`. Production uses `deepseek-v4-pro` |
 | `RECOMMENDATION_DAILY_MAX` | `0` | Optional ceiling per local day, across all runs. `0` = no limit |
 | `RECOMMENDATION_MIN_FIT` | `3` | Lowest fit that is sent |
-| `RECOMMENDATION_HOURS` | `8,12,16,20` | Local hours the job fires |
-| `RECOMMENDATION_MINUTE` | `30` | Minute of each hour |
 | `RECOMMENDATION_MIN_GAP_MINUTES` | `120` | A run this soon after the last does nothing |
-| `RECOMMENDATION_TIMEZONE` | `Asia/Ho_Chi_Minh` | Zone for the hours and the day boundary |
+| `RECOMMENDATION_TIMEZONE` | `Asia/Ho_Chi_Minh` | Zone for the day boundary |
 | `RECOMMENDATION_MIN_SAVES` | `5` | Fewer saves than this: skip |
 | `RECOMMENDATION_LOOKBACK_HOURS` | `36` | Longest window for candidates |
 | `RECOMMENDATION_IGNORED_DAYS` | `14` | How far back untouched picks count as a weak no |
@@ -112,7 +110,7 @@ On the VM a ranking call takes about 3 minutes with the Pro model. Run it detach
 | `app/infrastructure/repositories/postgres/recommendation_repo.py` | Queries and conflict-safe insert |
 | `app/presentation/bot/handlers/recommendation_delivery.py` | Sends the picks |
 | `scripts/run_recommendations.py` | CLI and the function the scheduler calls |
-| `scripts/run_scheduler.py` | `schedule_recommendations` registers the cron job |
+| `scripts/run_scheduler.py` | `recommend_step` is step 5 of the hourly pipeline |
 
 ## Known limits
 

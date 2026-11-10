@@ -51,13 +51,11 @@ Optional. The job is off until `RECOMMENDATION_ENABLED=true`. How it works: [rec
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `RECOMMENDATION_ENABLED` | No | `false` | Registers the job in `run_scheduler.py` |
+| `RECOMMENDATION_ENABLED` | No | `false` | Adds the recommend step to the hourly pipeline in `run_scheduler.py` |
 | `TELEGRAM_RECOMMENDATION_TOPIC_ID` | When enabled | - | Forum topic for the picks. If unset, nothing is sent |
 | `RECOMMENDATION_MODEL` | No | `OPENAI_MODEL` | Ranking model, for example `deepseek-v4-pro` |
 | `RECOMMENDATION_DAILY_MAX` | No | `0` | Optional ceiling per local day across all runs. `0` means no limit |
 | `RECOMMENDATION_MIN_FIT` | No | `3` | Lowest fit (3-5) that is sent. `3` sends everything the model returns |
-| `RECOMMENDATION_HOURS` | No | `8,12,16,20` | Local hours the job fires |
-| `RECOMMENDATION_MINUTE` | No | `30` | Minute of each hour |
 | `RECOMMENDATION_MIN_GAP_MINUTES` | No | `120` | A run this soon after the last does nothing |
 | `RECOMMENDATION_TIMEZONE` | No | `Asia/Ho_Chi_Minh` | Zone for the hours and the day boundary |
 | `RECOMMENDATION_MIN_SAVES` | No | `5` | Fewer saves than this: skip |
