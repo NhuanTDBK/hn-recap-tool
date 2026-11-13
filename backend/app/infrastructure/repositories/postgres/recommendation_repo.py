@@ -8,7 +8,14 @@ from sqlalchemy import Select, and_, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.recommendation import ENGAGED_ACTIONS, STRONG_ACTIONS, PostBrief, clip
+from app.domain.exploration import KIND_EXPLORE, SentPick
+from app.domain.recommendation import (
+    ENGAGED_ACTIONS,
+    STRONG_ACTIONS,
+    NewPick,
+    PostBrief,
+    clip,
+)
 from app.infrastructure.database.models import (
     Post,
     Recommendation,
@@ -126,6 +133,28 @@ class PostgresRecommendationRepository:
         )
         return list((await self.session.execute(stmt)).scalars().all())
 
+    async def get_sent_history(self, user_id: int, since: date) -> list[SentPick]:
+        """Return picks that reached the reader on or after ``since``, newest first.
+
+        Feeds the topic records and the explore/exploit metrics.
+        """
+        stmt = (
+            select(
+                Recommendation.post_id,
+                Recommendation.topic,
+                Recommendation.kind,
+                Recommendation.recommended_on,
+            )
+            .where(
+                Recommendation.user_id == user_id,
+                Recommendation.sent_at.isnot(None),
+                Recommendation.recommended_on >= since,
+            )
+            .order_by(Recommendation.sent_at.desc())
+        )
+        rows = await self.session.execute(stmt)
+        return [SentPick(r[0], r[1], r[2], r[3]) for r in rows.all()]
+
     # ------------------------------------------------------------- candidates
 
     def candidates_query(self, user_id: int, cutoff: datetime, limit: int) -> Select:
@@ -215,6 +244,15 @@ class PostgresRecommendationRepository:
         )
         return int((await self.session.execute(stmt)).scalar_one())
 
+    async def count_explore_for_day(self, user_id: int, day: date) -> int:
+        """Count explore picks stored for ``day`` (sent or waiting), against the explore ceiling."""
+        stmt = select(func.count(Recommendation.id)).where(
+            Recommendation.user_id == user_id,
+            Recommendation.recommended_on == day,
+            Recommendation.kind == KIND_EXPLORE,
+        )
+        return int((await self.session.execute(stmt)).scalar_one())
+
     async def get_last_run_at(self, user_id: int) -> datetime | None:
         """Return when the newest run for this feed started, or None if none ran."""
         stmt = select(func.max(RecommendationRun.created_at)).where(
@@ -262,7 +300,7 @@ class PostgresRecommendationRepository:
         run_id: UUID,
         user_id: int,
         day: date,
-        picks: list[tuple[UUID, int, int, str]],
+        picks: list[NewPick],
     ) -> list[Recommendation]:
         """Store picks (unsent) and commit the run with them.
 
@@ -273,7 +311,7 @@ class PostgresRecommendationRepository:
             run_id: Run these belong to
             user_id: Feed owner
             day: Local date of the run
-            picks: ``(post_id, rank, fit, reason)`` per pick
+            picks: Picks to store, best first
 
         Returns:
             The rows actually stored, best first (fewer than given if some were repeats)
@@ -300,7 +338,7 @@ class PostgresRecommendationRepository:
         run_id: UUID,
         user_id: int,
         day: date,
-        picks: list[tuple[UUID, int, int, str]],
+        picks: list[NewPick],
     ):
         """Build the insert that skips posts already recommended to this user."""
         return (
@@ -311,13 +349,16 @@ class PostgresRecommendationRepository:
                         "id": uuid4(),
                         "run_id": run_id,
                         "user_id": user_id,
-                        "post_id": post_id,
+                        "post_id": p.post_id,
                         "recommended_on": day,
-                        "rank": rank,
-                        "fit_score": fit,
-                        "reason": reason,
+                        "rank": p.rank,
+                        "fit_score": p.fit,
+                        "reason": p.reason,
+                        "topic": p.topic or None,
+                        "kind": p.kind,
+                        "quality": p.quality,
                     }
-                    for post_id, rank, fit, reason in picks
+                    for p in picks
                 ]
             )
             .on_conflict_do_nothing(constraint="uq_recommendations_user_post")
@@ -336,6 +377,14 @@ class PostgresRecommendationRepository:
     async def get_reason(self, user_id: int, post_id: UUID) -> str | None:
         """Return the stored reason a post was picked, for the Why button."""
         stmt = select(Recommendation.reason).where(
+            Recommendation.user_id == user_id,
+            Recommendation.post_id == post_id,
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def get_kind(self, user_id: int, post_id: UUID) -> str | None:
+        """Return whether a post was picked to ``exploit`` or ``explore``, or None if not picked."""
+        stmt = select(Recommendation.kind).where(
             Recommendation.user_id == user_id,
             Recommendation.post_id == post_id,
         )

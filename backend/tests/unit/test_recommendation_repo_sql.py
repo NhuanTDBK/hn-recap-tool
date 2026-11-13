@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from app.domain.recommendation import NewPick
 from app.infrastructure.repositories.postgres.recommendation_repo import (
     PostgresRecommendationRepository,
 )
@@ -54,7 +55,10 @@ def test_insert_skips_a_post_already_recommended_to_the_user():
     from uuid import uuid4
 
     stmt = PostgresRecommendationRepository.insert_picks_stmt(
-        uuid4(), 7, date(2026, 11, 9), [(uuid4(), 1, 5, "r"), (uuid4(), 2, 4, "s")]
+        uuid4(),
+        7,
+        date(2026, 11, 9),
+        [NewPick(uuid4(), 1, 5, "r"), NewPick(uuid4(), 2, 4, "s")],
     )
     sql = str(stmt.compile(dialect=postgresql.dialect()))
 
@@ -67,3 +71,33 @@ def test_the_unique_constraint_the_insert_names_exists_on_the_model():
 
     names = {c.name for c in Recommendation.__table__.constraints}
     assert "uq_recommendations_user_post" in names
+
+
+def test_insert_stores_topic_kind_and_quality():
+    from datetime import date
+    from uuid import uuid4
+
+    stmt = PostgresRecommendationRepository.insert_picks_stmt(
+        uuid4(),
+        7,
+        date(2026, 11, 9),
+        [NewPick(uuid4(), 1, 2, "r", topic="typography", kind="explore", quality=5)],
+    )
+    compiled = stmt.compile(dialect=postgresql.dialect())
+    insert_clause = str(compiled).split("VALUES")[0]
+
+    for column in ("topic", "kind", "quality"):
+        assert column in insert_clause
+    assert "typography" in compiled.params.values()
+    assert "explore" in compiled.params.values()
+
+
+def test_explore_columns_exist_on_the_model():
+    from app.infrastructure.database.models import Recommendation
+
+    cols = Recommendation.__table__.columns
+    assert cols["kind"].nullable is False
+    assert cols["topic"].nullable and cols["quality"].nullable
+    assert "ix_recommendations_user_topic" in {
+        i.name for i in Recommendation.__table__.indexes
+    }

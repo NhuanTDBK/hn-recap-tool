@@ -39,6 +39,7 @@ class RecommendationDeliveryHandler:
         summary: str | None,
         position: int,
         total: int,
+        explore: bool = False,
     ) -> int:
         """Send one recommended post with its More / Save / Why / Not for me buttons.
 
@@ -52,7 +53,7 @@ class RecommendationDeliveryHandler:
         result = await self.bot_manager.send_message(
             chat_id=chat_id,
             text=self.formatter.format_recommendation_message(
-                post, summary, position, total
+                post, summary, position, total, explore=explore
             ),
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=keyboard["inline_keyboard"]

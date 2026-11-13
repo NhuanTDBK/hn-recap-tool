@@ -6,6 +6,8 @@ The job runs every hour as the last step of the pipeline, right after the summar
 
 ## How it picks
 
+Picks that match the profile are the **exploit** picks, described below. A small share of **explore** picks (good posts outside the profile, off by default) can be mixed in: see [recommendation-exploration.md](recommendation-exploration.md).
+
 The model acts like a personal editor with a clippings folder: saved posts are examples of taste, and the taste is derived again on every run.
 
 | Signal | Source | Weight |
@@ -55,9 +57,9 @@ Handlers are in `app/presentation/bot/handlers/callbacks.py`. Taps in the group 
 Picks are kept apart from `deliveries` on purpose. A `deliveries` row hides the post from Streaming and breaks the reaction handlers, which expect one row per post.
 
 - `recommendation_runs`: one row per run. `created_at` is the run's start time, used as the next run's window start. Also stores the inferred interests, signal counts, model and tokens.
-- `recommendations`: one row per pick: `fit_score`, `reason`, `rank`, `message_id`, `sent_at` (null while unsent).
+- `recommendations`: one row per pick: `fit_score`, `reason`, `rank`, `message_id`, `sent_at` (null while unsent), and, for exploring, `topic`, `kind` (`exploit` or `explore`) and `quality`.
 
-Migration: `alembic/versions/20261109_add_recommendations.py`.
+Migrations: `alembic/versions/20261109_add_recommendations.py`, then `20261110_add_recommendation_exploration.py` for `topic`, `kind` and `quality`.
 
 ## Settings
 
@@ -75,6 +77,7 @@ All in `backend/.env`; see `backend/.env.example`.
 | `RECOMMENDATION_MIN_SAVES` | `5` | Fewer saves than this: skip |
 | `RECOMMENDATION_LOOKBACK_HOURS` | `36` | Longest window for candidates |
 | `RECOMMENDATION_IGNORED_DAYS` | `14` | How far back untouched picks count as a weak no |
+| `RECOMMENDATION_EXPLORE_*`, `RECOMMENDATION_TOPIC_HALF_LIFE_DAYS` | off | Exploration settings, listed in [recommendation-exploration.md](recommendation-exploration.md) |
 
 ## Operating it
 
@@ -116,6 +119,6 @@ On the VM a ranking call takes about 3 minutes with the Pro model. Run it detach
 
 - The profile is shared by everyone in the group, since taps are stored against the group row.
 - "Untouched" is a noisy signal: people skip posts for many reasons.
-- The profile can narrow over time, because only things like what was saved or picked feed back in.
+- The profile can narrow over time, because only things like what was saved or picked feed back in. [Exploration](recommendation-exploration.md) is the counterweight.
 - `agent_calls` shows a cost of 0 for `deepseek-*` models because they are missing from the pricing table. Token counts are recorded.
 - The SQL queries are covered by compile-time tests, not by a test database. The first production run is the real check.

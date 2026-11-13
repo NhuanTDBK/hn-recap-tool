@@ -214,6 +214,7 @@ uv sync
 - **[backend/AGENTS.md](backend/AGENTS.md)** - Comprehensive backend development guide
 - **[docs/spec.md](docs/spec.md)** - Full product specification
 - **[docs/recommendations.md](docs/recommendations.md)** - Recommendations: signals, schedule, settings, operations
+- **[docs/recommendation-exploration.md](docs/recommendation-exploration.md)** - Explore/exploit: topic record, budget, Thompson sampling, metrics
 - **[docs/configuration.md](docs/configuration.md)** - Environment variable reference
 - **[backend/README.md](backend/README.md)** - Backend quick start
 - **[README.md](README.md)** - Project overview

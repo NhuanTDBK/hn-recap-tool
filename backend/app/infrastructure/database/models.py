@@ -10,6 +10,7 @@ from sqlalchemy import (
     Column,
     Date,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     Numeric,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     Text,
     TIMESTAMP,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -131,9 +133,11 @@ class User(Base):
                 "technical_depth": "intermediate"
             }
 
-        # Update with provided kwargs
-        for key, value in kwargs.items():
-            self.summary_preferences[key] = value
+        # Assign a new dict: SQLAlchemy does not detect in-place changes to a plain JSON column,
+        # so mutating the existing dict would never be written to the database.
+        updated = dict(self.summary_preferences)
+        updated.update(kwargs)
+        self.summary_preferences = updated
 
     def __repr__(self):
         return f"<User(telegram_id={self.telegram_id}, username='{self.username}')>"
@@ -283,7 +287,7 @@ class Delivery(Base):
 
 
 class Conversation(Base):
-    """Stores discussion threads per user per post."""
+    """Stores discussion threads per user per post (or general topic if post_id is null)."""
 
     __tablename__ = "conversations"
 
@@ -292,7 +296,7 @@ class Conversation(Base):
 
     # Foreign keys
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    post_id = Column(UUID(as_uuid=True), ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+    post_id = Column(UUID(as_uuid=True), ForeignKey("posts.id", ondelete="CASCADE"), nullable=True, index=True)
 
     # Conversation data
     messages = Column(JSON, default=list)  # [{role, content, timestamp}, ...]
@@ -306,9 +310,20 @@ class Conversation(Base):
     user = relationship("User", back_populates="conversations")
     post = relationship("Post")
 
+    __table_args__ = (
+        # At most one active conversation (ended_at IS NULL) per user.
+        Index(
+            "uq_conversations_one_active_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("ended_at IS NULL"),
+        ),
+    )
+
     def __repr__(self):
         status = "active" if self.ended_at is None else "ended"
-        return f"<Conversation(user_id={self.user_id}, post_id={self.post_id}, status={status})>"
+        pid = self.post_id or "topic"
+        return f"<Conversation(user_id={self.user_id}, post_id={pid}, status={status})>"
 
 
 class UserActivityLog(Base):
@@ -388,6 +403,10 @@ class Recommendation(Base):
     fit_score = Column(Integer, nullable=False)  # 1-5, from the model
     reason = Column(Text, nullable=False)  # shown by the "Why" button
 
+    topic = Column(String(60), nullable=True)  # short topic label from the model; NULL on picks made before exploring
+    kind = Column(String(10), nullable=False, default="exploit", server_default="exploit")  # "exploit" or "explore"
+    quality = Column(Integer, nullable=True)  # 1-5 taste-independent quality; set on explore picks
+
     message_id = Column(Integer, nullable=True)  # Telegram message ID, set once sent
     sent_at = Column(TIMESTAMP(timezone=True), nullable=True)  # NULL = picked but not sent yet
 
@@ -396,7 +415,10 @@ class Recommendation(Base):
     run = relationship("RecommendationRun", back_populates="recommendations")
     post = relationship("Post")
 
-    __table_args__ = (UniqueConstraint("user_id", "post_id", name="uq_recommendations_user_post"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "post_id", name="uq_recommendations_user_post"),
+        Index("ix_recommendations_user_topic", "user_id", "topic"),
+    )
 
     def __repr__(self):
         return f"<Recommendation(user_id={self.user_id}, post_id={self.post_id}, fit={self.fit_score})>"

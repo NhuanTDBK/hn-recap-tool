@@ -82,7 +82,35 @@ def _print_report(stats: dict) -> None:
         items = stats.get(key) or []
         print(f"\n{label}: {len(items)}")
         for item in items:
-            print(f"  [{item['fit']}] {item['title']}\n      {item['reason']}")
+            topic = f" ({item['topic']})" if item.get("topic") else ""
+            print(f"  [{item['fit']}] {item['title']}{topic}\n      {item['reason']}")
+
+    if settings.recommendation_explore_enabled:
+        for label, key in (
+            ("Explore picks (sent)", "explore"),
+            ("Explore offers (all the model offered)", "explore_offered"),
+        ):
+            items = stats.get(key) or []
+            print(f"\n{label}: {len(items)}")
+            for item in items:
+                print(
+                    f"  [q{item['quality']}] {item['title']} ({item['topic']})\n"
+                    f"      {item['reason']}"
+                )
+    else:
+        print("\nExploring is off (RECOMMENDATION_EXPLORE_ENABLED=false)")
+
+    metrics = stats.get("metrics") or {}
+    if metrics:
+        print(
+            "\nOutcomes of picks already sent (last 90 days, picks under a day old skipped):"
+        )
+        for kind, m in sorted(metrics.items()):
+            rate = f"{m['saved'] / m['judged']:.0%}" if m["judged"] else "-"
+            print(
+                f"  {kind:8} judged={m['judged']} saved={m['saved']} ({rate}) "
+                f"rejected={m['rejected']} opened={m['opened']} ignored={m['ignored']}"
+            )
     print(f"\nSent: {stats['sent']}  Failed: {stats['failed']}")
     print("=" * 80)
 

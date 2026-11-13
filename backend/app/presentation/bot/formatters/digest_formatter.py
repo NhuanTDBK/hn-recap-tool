@@ -23,6 +23,7 @@ class DigestMessageFormatter:
 
     # Telegram message character limits
     MAX_MESSAGE_LENGTH = 4096
+    EXPLORE_LABEL = "🧭 <i>Outside your usual</i>"  # shown on picks that explore, so a miss is expected
     SUMMARY_TRUNCATE_LENGTH = 500
 
     def __init__(self):
@@ -35,6 +36,7 @@ class DigestMessageFormatter:
         position: int,
         total: int,
         summary: Optional[str] = None,
+        explore: bool = False,
     ) -> str:
         """Format a single post as a Telegram message.
 
@@ -57,11 +59,14 @@ class DigestMessageFormatter:
             total: Total posts in digest
             summary: Summary to show; defaults to post.summary. Pass the feed's own
                 summary instead of changing the shared ``post.summary`` column.
+            explore: Put the "Outside your usual" label above the title
 
         Returns:
             Formatted message text (without buttons)
         """
         message_parts = []
+        if explore:
+            message_parts.append(self.EXPLORE_LABEL)
 
         # Title (bold with HTML)
         title = post.title or "Untitled"
@@ -103,6 +108,7 @@ class DigestMessageFormatter:
         position: int,
         total: int,
         summary: Optional[str] = None,
+        explore: bool = False,
     ) -> str:
         """Format a single post with full untruncated summary (for "Show More" expansion).
 
@@ -114,12 +120,15 @@ class DigestMessageFormatter:
             position: Position in digest (1-based)
             total: Total posts in digest
             summary: Summary text to show; defaults to post.summary
+            explore: Put the "Outside your usual" label above the title
 
         Returns:
             Formatted message text with full summary
         """
         summary_text = summary if summary is not None else post.summary
         message_parts = []
+        if explore:
+            message_parts.append(self.EXPLORE_LABEL)
 
         # Title (bold with HTML)
         title = post.title or "Untitled"
@@ -165,12 +174,16 @@ class DigestMessageFormatter:
         summary: Optional[str],
         position: int,
         total: int,
+        explore: bool = False,
     ) -> str:
         """Format one recommended post (same layout as the Streaming feed).
 
-        The reason is not in the message; the Why button shows it.
+        The reason is not in the message; the Why button shows it. A pick that
+        explores gets a short label above the title.
         """
-        return self.format_post_message(post, position, total, summary=summary)
+        return self.format_post_message(
+            post, position, total, summary=summary, explore=explore
+        )
 
     def format_batch_header(self, total_posts: int) -> str:
         """Format header message for digest batch.

@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
+from app.domain.exploration import KIND_EXPLOIT, ExplorePick, TopicStats
+
 # Activity actions that say something about taste. ``why`` is an interaction with a
 # recommendation (the reader looked at the reason) but not a verdict either way.
 ACTION_SAVE = "save"
@@ -44,6 +46,9 @@ class TasteSignals:
     opened: list[PostBrief] = field(default_factory=list)
     ignored: list[PostBrief] = field(default_factory=list)
     saved_total: int = 0  # all distinct saves, not just the ones shown to the model
+    topics: list[TopicStats] = field(
+        default_factory=list
+    )  # record per topic, most shown first
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,7 @@ class RankedPick:
     hn_id: int
     fit: int
     reason: str
+    topic: str = ""
 
 
 @dataclass
@@ -63,6 +69,22 @@ class RankingResult:
     picks: list[RankedPick]
     input_tokens: int = 0
     output_tokens: int = 0
+    explore: list[ExplorePick] = field(
+        default_factory=list
+    )  # good posts outside the profile
+
+
+@dataclass(frozen=True)
+class NewPick:
+    """A pick ready to be stored."""
+
+    post_id: UUID
+    rank: int
+    fit: int
+    reason: str
+    topic: str = ""
+    kind: str = KIND_EXPLOIT
+    quality: int | None = None
 
 
 @dataclass

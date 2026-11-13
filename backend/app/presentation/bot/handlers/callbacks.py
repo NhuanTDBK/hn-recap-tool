@@ -169,9 +169,9 @@ async def handle_react_up(callback: CallbackQuery, session: AsyncSession):
                 Delivery.user_id == user.id,
                 Delivery.post_id == UUID(post_id)
             )
-        ).order_by(Delivery.delivered_at.desc())
+        ).order_by(Delivery.delivered_at.desc()).limit(1)
         result = await session.execute(stmt)
-        delivery = result.scalar_one_or_none()
+        delivery = result.scalars().first()
 
         if delivery:
             # Update reaction on delivery (preserve existing behavior)
@@ -200,7 +200,7 @@ async def handle_react_up(callback: CallbackQuery, session: AsyncSession):
                 if is_expanded
                 else builder.build_post_keyboard(post_id)
             )
-            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
             logger.debug(f"Swapped keyboard back to default for post {post_id}")
         except Exception as keyboard_error:
             logger.warning(f"Failed to swap keyboard back: {keyboard_error}")
@@ -242,9 +242,9 @@ async def handle_react_down(callback: CallbackQuery, session: AsyncSession):
                 Delivery.user_id == user.id,
                 Delivery.post_id == UUID(post_id)
             )
-        ).order_by(Delivery.delivered_at.desc())
+        ).order_by(Delivery.delivered_at.desc()).limit(1)
         result = await session.execute(stmt)
-        delivery = result.scalar_one_or_none()
+        delivery = result.scalars().first()
 
         if delivery:
             # Update reaction on delivery (preserve existing behavior)
@@ -273,7 +273,7 @@ async def handle_react_down(callback: CallbackQuery, session: AsyncSession):
                 if is_expanded
                 else builder.build_post_keyboard(post_id)
             )
-            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
             logger.debug(f"Swapped keyboard back to default for post {post_id}")
         except Exception as keyboard_error:
             logger.warning(f"Failed to swap keyboard back: {keyboard_error}")
@@ -408,11 +408,22 @@ async def handle_show_more(callback: CallbackQuery, session: AsyncSession):
         formatter = DigestMessageFormatter()
         # We need position and total for formatting, but we can infer from message or use defaults
         # For now, use reasonable defaults (1/1 since we're just showing the post)
-        full_text = formatter.format_post_message_full(post, position=1, total=1, summary=summary_text)
-
-        # Build keyboard without "More" button (recommended posts keep Why / Not for me)
         builder = InlineKeyboardBuilder()
         state = _keyboard_state(callback)
+
+        # An explore pick keeps its "Outside your usual" label when expanded.
+        is_explore = False
+        if state["recommended"]:
+            try:
+                kind = await PostgresRecommendationRepository(session).get_kind(user.id, post.id)
+                is_explore = kind == "explore"
+            except Exception as kind_error:
+                logger.warning(f"Could not look up the pick kind for the label: {kind_error}")
+        full_text = formatter.format_post_message_full(
+            post, position=1, total=1, summary=summary_text, explore=is_explore
+        )
+
+        # Build keyboard without "More" button (recommended posts keep Why / Not for me)
         if state["recommended"]:
             keyboard = builder.build_recommendation_keyboard(
                 post_id,
@@ -557,7 +568,7 @@ async def handle_actions_menu(callback: CallbackQuery):
 
         # Swap the keyboard
         try:
-            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
             logger.info(f"Swapped to reactions menu for post {post_id}")
         except Exception as edit_error:
             logger.warning(f"Failed to edit message keyboard: {edit_error}")
@@ -611,7 +622,7 @@ async def handle_back_to_default(callback: CallbackQuery):
 
         # Swap the keyboard
         try:
-            await callback.message.edit_message_reply_markup(reply_markup=keyboard)
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
             logger.info(f"Returned to default menu for post {post_id}")
         except Exception as edit_error:
             logger.warning(f"Failed to edit message keyboard: {edit_error}")

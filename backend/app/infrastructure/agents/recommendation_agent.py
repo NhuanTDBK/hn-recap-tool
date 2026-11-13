@@ -1,8 +1,10 @@
 """Recommendation agent: picks the posts a reader will want from today's candidates.
 
 One LLM call per run. The reader's saves, rejections and reactions go in as examples
-of taste; the model returns picks with a 1-5 fit rating and a one-line reason. The
-program, not the model, decides the final count (fit cut-off and daily cap).
+of taste; the model returns picks with a 1-5 fit rating, a topic and a one-line reason,
+and, when asked, a short list of good posts outside the profile to explore. The program,
+not the model, decides the final count (fit cut-off, daily cap) and which explore offers
+are sent (see ``app.domain.exploration``).
 """
 
 import json
@@ -15,6 +17,7 @@ from typing import Any
 from agents import Runner
 from pydantic import BaseModel, Field, ValidationError
 
+from app.domain.exploration import ExplorePick, TopicStats, normalize_topic
 from app.domain.recommendation import (
     INTERESTS_MAX,
     REASON_MAX_CHARS,
@@ -32,6 +35,7 @@ from .summarization_agent import load_prompt_content
 logger = logging.getLogger(__name__)
 
 PROMPT_NAME = "recommendation_system"
+EXPLORE_OFFERS_MAX = 8  # most explore offers asked of the model per run
 
 
 class RankingError(Exception):
@@ -53,6 +57,14 @@ class _PickModel(BaseModel):
     hn_id: int
     fit: int = Field(ge=1, le=5)
     reason: str = Field(min_length=1)
+    topic: str = ""
+
+
+class _ExploreModel(BaseModel):
+    hn_id: int
+    topic: str = Field(min_length=1)
+    quality: int = Field(ge=1, le=5)
+    reason: str = Field(min_length=1)
 
 
 def _post_line(p: PostBrief, *, with_summary: bool) -> str:
@@ -63,7 +75,16 @@ def _post_line(p: PostBrief, *, with_summary: bool) -> str:
     return line
 
 
-def build_ranking_input(signals: TasteSignals, candidates: list[PostBrief]) -> str:
+def _topic_line(t: TopicStats) -> str:
+    return (
+        f"- {escape(t.topic, quote=False)} "
+        f"(sent {t.shown}, saved {t.saved}, rejected {t.rejected}, ignored {t.ignored})"
+    )
+
+
+def build_ranking_input(
+    signals: TasteSignals, candidates: list[PostBrief], explore_limit: int = 0
+) -> str:
     """Render the user message for the ranking call.
 
     Post text is HTML-escaped so a title or summary cannot close one of our section
@@ -72,6 +93,7 @@ def build_ranking_input(signals: TasteSignals, candidates: list[PostBrief]) -> s
     Args:
         signals: The reader's taste signals
         candidates: Posts to choose from
+        explore_limit: Most explore offers the model may return; 0 means none
 
     Returns:
         The full user message
@@ -89,6 +111,9 @@ def build_ranking_input(signals: TasteSignals, candidates: list[PostBrief]) -> s
         "<ignored>",
         *(_post_line(p, with_summary=False) for p in signals.ignored),
         "</ignored>",
+        "<topics>",
+        *(_topic_line(t) for t in signals.topics),
+        "</topics>",
         "<candidates>",
     ]
     for c in candidates:
@@ -98,6 +123,7 @@ def build_ranking_input(signals: TasteSignals, candidates: list[PostBrief]) -> s
             + (f"\n  {escape(c.summary, quote=False)}" if c.summary else "")
         )
     parts.append("</candidates>")
+    parts.append(f"<explore_limit>{max(explore_limit, 0)}</explore_limit>")
     return "\n".join(parts)
 
 
@@ -162,9 +188,57 @@ def parse_ranking(
                 hn_id=pick.hn_id,
                 fit=pick.fit,
                 reason=clip(pick.reason, REASON_MAX_CHARS),
+                topic=normalize_topic(pick.topic),
             )
         )
     return interests, picks
+
+
+def parse_explore(
+    text: str, valid_hn_ids: set[int], limit: int = EXPLORE_OFFERS_MAX
+) -> list[ExplorePick]:
+    """Read the model's explore offers.
+
+    Never raises: exploring is a bonus, so a missing or broken ``explore`` list must not
+    cost the run its normal picks. Bad entries are dropped.
+
+    Args:
+        text: Raw model output
+        valid_hn_ids: ``hn_id`` values that were actually offered
+        limit: Most offers to keep
+
+    Returns:
+        Offers in the model's order, duplicates and unknown posts removed
+    """
+    try:
+        data = _extract_json(text)
+    except RankingParseError:
+        return []
+    raw = data.get("explore") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return []
+
+    offers: list[ExplorePick] = []
+    seen: set[int] = set()
+    for item in raw:
+        try:
+            offer = _ExploreModel.model_validate(item)
+        except ValidationError:
+            logger.warning(f"Dropping malformed explore offer: {item!r}")
+            continue
+        topic = normalize_topic(offer.topic)
+        if offer.hn_id not in valid_hn_ids or offer.hn_id in seen or not topic:
+            continue
+        seen.add(offer.hn_id)
+        offers.append(
+            ExplorePick(
+                hn_id=offer.hn_id,
+                topic=topic,
+                quality=offer.quality,
+                reason=clip(offer.reason, REASON_MAX_CHARS),
+            )
+        )
+    return offers[:limit]
 
 
 def create_recommendation_agent(model: str = settings.openai_model) -> BaseAgent:
@@ -174,13 +248,16 @@ def create_recommendation_agent(model: str = settings.openai_model) -> BaseAgent
         instructions=load_prompt_content(PROMPT_NAME),
         model=model,
         temperature=0.2,
-        max_tokens=4000,
+        max_tokens=6000,
         tools=[],
     )
 
 
 async def rank_candidates(
-    signals: TasteSignals, candidates: list[PostBrief], model: str | None = None
+    signals: TasteSignals,
+    candidates: list[PostBrief],
+    model: str | None = None,
+    explore_limit: int = 0,
 ) -> RankingResult:
     """Ask the model which candidates this reader would want.
 
@@ -191,9 +268,10 @@ async def rank_candidates(
         signals: The reader's taste signals
         candidates: Posts to choose from (must not be empty)
         model: Model to use; defaults to the app-wide model
+        explore_limit: Most explore offers to ask for; 0 asks for none
 
     Returns:
-        Interests, picks (unfiltered by fit) and token usage
+        Interests, picks (unfiltered by fit), explore offers and token usage
 
     Raises:
         RankingParseError: If both attempts return unusable replies
@@ -202,7 +280,7 @@ async def rank_candidates(
     agent = (
         create_recommendation_agent(model) if model else create_recommendation_agent()
     )
-    user_input = build_ranking_input(signals, candidates)
+    user_input = build_ranking_input(signals, candidates, explore_limit)
     valid_ids = {c.hn_id for c in candidates}
 
     input_tokens = output_tokens = 0
@@ -233,6 +311,15 @@ async def rank_candidates(
             picks=picks,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            explore=(
+                parse_explore(
+                    str(run.final_output),
+                    valid_ids,
+                    min(explore_limit, EXPLORE_OFFERS_MAX),
+                )
+                if explore_limit > 0
+                else []
+            ),
         )
 
     assert last_error is not None

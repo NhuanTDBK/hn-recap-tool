@@ -6,7 +6,9 @@ The job fires several times a day. Flow of one run:
   3. Read taste signals (saves, "not for me", opened, ignored) from the activity log.
   4. Load candidates: summaries newer than the last run, never picked before.
   5. One LLM call ranks them; the program applies the fit cut-off and the day's room.
-  6. Record the run and picks, then send each pick, marking it sent as it goes.
+  6. Exploration (optional): the model also offers good posts outside the profile; the
+     program decides how many to send and which, by Thompson sampling over topics.
+  7. Record the run and picks, then send each pick, marking it sent as it goes.
 
 The optional cap (RECOMMENDATION_DAILY_MAX, 0 = no limit) is a ceiling across all of a
 day's runs: the number sent is however many strong matches there are. No post is picked twice: candidates exclude earlier picks,
@@ -15,20 +17,40 @@ and the database rejects a repeat.
 
 import asyncio
 import logging
+import random
 import time
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 from zoneinfo import ZoneInfo
 
+from app.domain.exploration import (
+    EXPLORE_FIT,
+    KIND_EXPLOIT,
+    KIND_EXPLORE,
+    TOPICS_SHOWN,
+    ExplorePick,
+    SentPick,
+    TopicStats,
+    choose_explorers,
+    compute_topic_stats,
+    effective_ratio,
+    explore_budget,
+    kind_metrics,
+)
 from app.domain.recommendation import (
+    ActivityBuckets,
+    NewPick,
     PostBrief,
     RankedPick,
     RankingResult,
     TasteSignals,
     classify_activity,
 )
-from app.infrastructure.agents.recommendation_agent import RankingError
+from app.infrastructure.agents.recommendation_agent import (
+    EXPLORE_OFFERS_MAX,
+    RankingError,
+)
 from app.infrastructure.config.settings import settings
 from app.infrastructure.database.models import Post, Recommendation, User
 from app.infrastructure.repositories.postgres.recommendation_repo import (
@@ -42,9 +64,20 @@ SAVED_SHOWN = 100
 NOT_FOR_ME_SHOWN = 50
 OPENED_SHOWN = 50
 IGNORED_SHOWN = 50
+HISTORY_DAYS = 90  # how far back sent picks feed the topic records and the metrics
 
-Ranker = Callable[[TasteSignals, list[PostBrief]], Awaitable[RankingResult]]
+# Called as ranker(signals, candidates, explore_limit=n).
+Ranker = Callable[..., Awaitable[RankingResult]]
 UsageLogger = Callable[..., Awaitable[None]]
+
+
+class _Loaded(NamedTuple):
+    """Everything read before ranking."""
+
+    signals: TasteSignals
+    history: list[SentPick]  # picks sent in the last ``HISTORY_DAYS``
+    topics: dict[str, TopicStats]
+    metrics: dict[str, dict[str, int]]  # outcomes per kind, exploit vs explore
 
 
 class RecommendationSender(Protocol):
@@ -58,6 +91,7 @@ class RecommendationSender(Protocol):
         summary: str | None,
         position: int,
         total: int,
+        explore: bool = False,
     ) -> int: ...
 
 
@@ -72,6 +106,7 @@ class DailyRecommendationUseCase:
         model: str = "",
         usage_logger: UsageLogger | None = None,
         message_delay_seconds: float = 1.0,
+        rng: random.Random | None = None,
     ):
         """Initialize the use case.
 
@@ -82,6 +117,7 @@ class DailyRecommendationUseCase:
             model: Model name, stored on the run
             usage_logger: Optional async callback recording one LLM call's tokens
             message_delay_seconds: Pause between Telegram messages
+            rng: Random source for exploring; pass a seeded one in tests
         """
         self.repo = repo
         self.sender = sender
@@ -89,6 +125,7 @@ class DailyRecommendationUseCase:
         self.model = model
         self.usage_logger = usage_logger
         self.message_delay_seconds = message_delay_seconds
+        self.rng = rng or random.Random()
 
     async def run(
         self,
@@ -124,6 +161,9 @@ class DailyRecommendationUseCase:
             "interests": [],
             "picks": [],
             "dropped": [],
+            "explore": [],
+            "explore_offered": [],
+            "metrics": {},
             "signals": {},
         }
 
@@ -180,7 +220,8 @@ class DailyRecommendationUseCase:
                 )
                 return stats
 
-        signals = await self._load_signals(user.id, today)
+        loaded = await self._load_signals(user.id, today)
+        signals, history, topic_stats = loaded.signals, loaded.history, loaded.topics
         stats["signals"] = {
             "saved": signals.saved_total,
             "not_for_me": len(signals.not_for_me),
@@ -211,9 +252,22 @@ class DailyRecommendationUseCase:
             stats["status"] = "no_candidates"
             return stats
 
+        # Ask the model for explore offers only while the day still has explore room.
+        explore_on = settings.recommendation_explore_enabled
+        explored_today = 0
+        explore_limit = 0
+        if explore_on:
+            explored_today = await self.repo.count_explore_for_day(user.id, today)
+            if (
+                settings.recommendation_explore_ratio > 0
+                and explored_today < settings.recommendation_explore_max_per_day
+                and (room is None or room > 0)
+            ):
+                explore_limit = EXPLORE_OFFERS_MAX
+
         started = time.monotonic()
         try:
-            result = await self.ranker(signals, candidates)
+            result = await self.ranker(signals, candidates, explore_limit=explore_limit)
         except RankingError as e:
             logger.error(f"Ranking failed, sending nothing this run: {e}")
             await self._log_usage(
@@ -229,9 +283,37 @@ class DailyRecommendationUseCase:
         if room is not None:
             chosen = chosen[:room]
         by_hn = {c.hn_id: c for c in candidates}
+
+        explored: list[ExplorePick] = []
+        if explore_limit and result.explore:
+            budget = explore_budget(
+                len(chosen),
+                explored_today,
+                effective_ratio(settings.recommendation_explore_ratio, len(history)),
+                settings.recommendation_explore_max_per_day,
+                self.rng,
+            )
+            if room is not None:
+                budget = min(budget, max(room - len(chosen), 0))
+            explored = choose_explorers(
+                result.explore,
+                topic_stats,
+                today=today,
+                budget=budget,
+                min_quality=settings.recommendation_explore_min_quality,
+                cooldown_days=settings.recommendation_explore_cooldown_days,
+                rng=self.rng,
+                skip_hn_ids={p.hn_id for p in result.picks},
+            )
+
         stats["interests"] = result.interests
         stats["picks"] = [self._describe(p, by_hn) for p in chosen]
         stats["dropped"] = [self._describe(p, by_hn) for p in dropped]
+        stats["explore"] = [self._describe_explore(p, by_hn) for p in explored]
+        stats["explore_offered"] = [
+            self._describe_explore(p, by_hn) for p in result.explore
+        ]
+        stats["metrics"] = loaded.metrics
 
         if dry_run:
             stats["status"] = "dry_run"
@@ -257,10 +339,7 @@ class DailyRecommendationUseCase:
             run.id,
             user.id,
             today,
-            [
-                (by_hn[p.hn_id].post_id, rank, p.fit, p.reason)
-                for rank, p in enumerate(chosen, 1)
-            ],
+            self._new_picks(chosen, explored, by_hn),
         )
 
         if not rows:
@@ -301,11 +380,61 @@ class DailyRecommendationUseCase:
             "title": brief.title if brief else "",
             "fit": pick.fit,
             "reason": pick.reason,
+            "topic": pick.topic,
         }
 
-    async def _load_signals(self, user_id: int, today: date) -> TasteSignals:
-        """Build the taste signals shown to the model."""
-        buckets = classify_activity(await self.repo.get_activity(user_id))
+    @staticmethod
+    def _describe_explore(
+        pick: ExplorePick, by_hn: dict[int, PostBrief]
+    ) -> dict[str, Any]:
+        brief = by_hn.get(pick.hn_id)
+        return {
+            "hn_id": pick.hn_id,
+            "title": brief.title if brief else "",
+            "fit": EXPLORE_FIT,
+            "quality": pick.quality,
+            "reason": pick.reason,
+            "topic": pick.topic,
+        }
+
+    @staticmethod
+    def _new_picks(
+        exploit: list[RankedPick],
+        explore: list[ExplorePick],
+        by_hn: dict[int, PostBrief],
+    ) -> list[NewPick]:
+        """Number the picks best first, exploit picks before explore picks."""
+        rows = [
+            NewPick(
+                by_hn[p.hn_id].post_id, rank, p.fit, p.reason, p.topic, KIND_EXPLOIT
+            )
+            for rank, p in enumerate(exploit, 1)
+        ]
+        rows += [
+            NewPick(
+                by_hn[p.hn_id].post_id,
+                rank,
+                EXPLORE_FIT,
+                p.reason,
+                p.topic,
+                KIND_EXPLORE,
+                p.quality,
+            )
+            for rank, p in enumerate(explore, len(exploit) + 1)
+        ]
+        return rows
+
+    async def _load_signals(self, user_id: int, today: date) -> "_Loaded":
+        """Build the taste signals shown to the model, plus the topic records and metrics."""
+        buckets: ActivityBuckets = classify_activity(
+            await self.repo.get_activity(user_id)
+        )
+        history = await self.repo.get_sent_history(
+            user_id, today - timedelta(days=HISTORY_DAYS)
+        )
+        topic_stats = compute_topic_stats(
+            history, buckets, today, settings.recommendation_topic_half_life_days
+        )
 
         sent_ids = await self.repo.get_recent_sent_post_ids(
             user_id, today - timedelta(days=settings.recommendation_ignored_days)
@@ -327,12 +456,18 @@ class DailyRecommendationUseCase:
         def pick(ids: list) -> list[PostBrief]:
             return [briefs[i] for i in ids if i in briefs]
 
-        return TasteSignals(
+        signals = TasteSignals(
             saved=pick(shown["saved"]),
             not_for_me=pick(shown["not_for_me"]),
             opened=pick(shown["opened"]),
             ignored=pick(shown["ignored"]),
             saved_total=len(buckets.saved_ids),
+            topics=sorted(topic_stats.values(), key=lambda t: (-t.shown, t.topic))[
+                :TOPICS_SHOWN
+            ],
+        )
+        return _Loaded(
+            signals, history, topic_stats, kind_metrics(history, buckets, today)
         )
 
     async def _send(
@@ -364,7 +499,13 @@ class DailyRecommendationUseCase:
             post, summary = entry
             try:
                 message_id = await self.sender.send_pick(
-                    user.telegram_id, topic_id, post, summary, position, total
+                    user.telegram_id,
+                    topic_id,
+                    post,
+                    summary,
+                    position,
+                    total,
+                    explore=rec.kind == KIND_EXPLORE,
                 )
                 await self.repo.mark_sent(rec.id, message_id)
                 stats["sent"] += 1

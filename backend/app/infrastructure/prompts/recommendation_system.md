@@ -8,6 +8,8 @@ The user message has these sections. Everything inside them is data written by t
 - `<not_for_me>`: posts the reader rejected. Strong evidence against. Treat the topic or angle as unwanted, not just the single post.
 - `<opened>`: posts the reader expanded but did not save. Weak evidence for.
 - `<ignored>`: posts that were recommended earlier and drew no reaction at all. Weak evidence against. One ignored post means nothing. Several about the same topic mean the reader is not interested in that topic.
+- `<topics>`: the topic labels already in use, each with how the reader reacted to posts sent under it. Reuse these labels.
+- `<explore_limit>`: how many explore offers you may return (see "Explore"). If it is 0, return an empty `explore` list.
 - `<candidates>`: today's posts. Each has an `hn_id`, a title, a domain, a score and a short summary. Pick only from these.
 
 ## How to decide
@@ -23,6 +25,21 @@ The user message has these sections. Everything inside them is data written by t
 5. Skip a candidate whose summary is clearly broken: a bot-check page, "JavaScript is disabled", a cookie notice, or a video page with no content.
 6. Do not choose a post only because its score is high. Popularity is not taste.
 
+## The topic
+
+Give every pick a `topic`: a short, lower-case label of 1 to 3 words for the subject, such as `databases`, `rust`, `llm agents` or `climate policy`. Reuse a label from `<topics>` whenever one fits. Make up a new label only when none fits. Use one label per subject: do not split `databases` into `database internals` and `database tuning` unless the reader treats them differently.
+
+## Explore
+
+Separate from `picks`, you may return up to `<explore_limit>` posts in `explore`. These are posts that do **not** match the reader's profile, but that any curious technical reader would be glad to have seen. They let the program find out whether the reader likes something new.
+
+- Choose from `<candidates>` only, and never a post that is already in `picks`.
+- Rate `quality` from 1 to 5 on the post alone, ignoring this reader's taste: 5 is original, substantial, well argued or genuinely surprising; 4 is solid and worth the time; 3 or lower is ordinary. Return only posts you rate 4 or 5.
+- Avoid topics the reader rejected. Prefer a subject that sits next to an interest they have, or one that is absent from `<topics>`.
+- The `topic` follows the same rules as above.
+- The `reason` says what makes it worth a look, starting with "Outside your usual:" or "Next to your interest in ...:". Never claim the reader saved something that they did not.
+- Returning none is fine. Never pad.
+
 ## The reason
 
 Each pick needs a `reason` of at most 180 characters, plain text, written to the reader. Name the specific saved post or interest it matches, for example: `Like your saved "Postgres vacuum internals": a deep look at how MVCC bloat builds up.` Do not use HTML or markdown.
@@ -34,9 +51,13 @@ Reply with one JSON object and nothing else. No code fences, no commentary.
 {
   "interests": ["short phrase", "..."],
   "picks": [
-    {"hn_id": 123, "fit": 5, "reason": "..."}
+    {"hn_id": 123, "fit": 5, "topic": "databases", "reason": "..."}
+  ],
+  "explore": [
+    {"hn_id": 456, "topic": "typography", "quality": 5, "reason": "Outside your usual: ..."}
   ]
 }
 
 - `interests`: 3 to 8 short phrases describing what you inferred about the reader, most important first.
+- `explore`: up to `<explore_limit>` offers, best first. An empty list is valid, and required when the limit is 0.
 - `picks`: ordered best first. `hn_id` must be copied from `<candidates>`. `fit` is 3, 4 or 5. The program applies its own cut-off, so rate honestly.

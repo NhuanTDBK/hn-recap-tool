@@ -229,3 +229,48 @@ async def test_more_on_a_streaming_post_is_unchanged(activity):
 
     shown = labels(cb.message.edit_text.await_args.kwargs["reply_markup"])
     assert shown == ["🔖 Save", "⚡ Actions"]
+
+
+# ------------------------------------------------------- explore label stays
+
+
+@pytest.mark.asyncio
+async def test_more_on_an_explore_pick_keeps_the_label(activity):
+    pid = uuid4()
+    post = Post(id=pid, hn_id=1, title="T", summary="", score=1, comment_count=0)
+    kb = InlineKeyboardBuilder().build_recommendation_keyboard(str(pid))
+    cb = make_callback(f"show_more_{pid}", kb)
+
+    with patch.object(callbacks, "PostgresRecommendationRepository") as repo:
+        repo.return_value.get_kind = AsyncMock(return_value="explore")
+        await handle_show_more(cb, _more_session(post))
+
+    assert "Outside your usual" in cb.message.edit_text.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_more_on_an_exploit_pick_has_no_label(activity):
+    pid = uuid4()
+    post = Post(id=pid, hn_id=1, title="T", summary="", score=1, comment_count=0)
+    kb = InlineKeyboardBuilder().build_recommendation_keyboard(str(pid))
+    cb = make_callback(f"show_more_{pid}", kb)
+
+    with patch.object(callbacks, "PostgresRecommendationRepository") as repo:
+        repo.return_value.get_kind = AsyncMock(return_value="exploit")
+        await handle_show_more(cb, _more_session(post))
+
+    assert "Outside your usual" not in cb.message.edit_text.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_kind_lookup_still_expands_the_message(activity):
+    pid = uuid4()
+    post = Post(id=pid, hn_id=1, title="T", summary="", score=1, comment_count=0)
+    kb = InlineKeyboardBuilder().build_recommendation_keyboard(str(pid))
+    cb = make_callback(f"show_more_{pid}", kb)
+
+    with patch.object(callbacks, "PostgresRecommendationRepository") as repo:
+        repo.return_value.get_kind = AsyncMock(side_effect=RuntimeError("db down"))
+        await handle_show_more(cb, _more_session(post))
+
+    cb.message.edit_text.assert_awaited_once()

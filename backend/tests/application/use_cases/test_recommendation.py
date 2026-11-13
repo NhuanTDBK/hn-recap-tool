@@ -4,6 +4,7 @@ Run against an in-memory repository and a recording sender, so the rules (cap, f
 cut-off, no repeats, resume after a crash) are tested without a database or Telegram.
 """
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -12,6 +13,7 @@ from uuid import uuid4
 import pytest
 
 from app.application.use_cases.recommendation import DailyRecommendationUseCase
+from app.domain.exploration import ExplorePick, SentPick
 from app.domain.recommendation import PostBrief, RankedPick, RankingResult
 from app.infrastructure.agents.recommendation_agent import (
     RankingError,
@@ -51,6 +53,7 @@ class FakeRepo:
                 comment_count=3,
             )
         self.sent_ids: list = []
+        self.history: list = []
         self.runs: list = []
         self.recs: list = []
         self.cutoffs: list = []
@@ -87,6 +90,9 @@ class FakeRepo:
         taken = {r.post_id for r in self.recs}  # never recommend a post twice
         return [c for c in self.candidates if c.post_id not in taken]
 
+    async def get_sent_history(self, user_id, since):
+        return [h for h in self.history if h.recommended_on >= since]
+
     # run state
     async def delete_stale_unsent(self, user_id, before):
         stale = [
@@ -106,6 +112,11 @@ class FakeRepo:
 
     async def count_for_day(self, user_id, day):
         return sum(1 for r in self.recs if r.recommended_on == day)
+
+    async def count_explore_for_day(self, user_id, day):
+        return sum(
+            1 for r in self.recs if r.recommended_on == day and r.kind == "explore"
+        )
 
     async def create_run(
         self,
@@ -135,16 +146,19 @@ class FakeRepo:
             SimpleNamespace(
                 id=uuid4(),
                 run_id=run_id,
-                post_id=pid,
-                rank=rank,
-                fit_score=fit,
-                reason=reason,
+                post_id=p.post_id,
+                rank=p.rank,
+                fit_score=p.fit,
+                reason=p.reason,
+                topic=p.topic or None,
+                kind=p.kind,
+                quality=p.quality,
                 recommended_on=day,
                 sent_at=None,
                 message_id=None,
             )
-            for pid, rank, fit, reason in picks
-            if pid not in taken
+            for p in picks
+            if p.post_id not in taken
         ]
         self.recs.extend(rows)
         return rows
@@ -162,12 +176,17 @@ class FakeSender:
     def __init__(self, fail_hn_ids=()):
         self.picks: list = []
         self.fail_hn_ids = set(fail_hn_ids)
+        self.explored: list = []
         self._next = 500
 
-    async def send_pick(self, chat_id, topic_id, post, summary, position, total):
+    async def send_pick(
+        self, chat_id, topic_id, post, summary, position, total, explore=False
+    ):
         if post.hn_id in self.fail_hn_ids:
             raise RuntimeError("rejected")
         self.picks.append((chat_id, topic_id, post.hn_id, position, total))
+        if explore:
+            self.explored.append(post.hn_id)
         self._next += 1
         return self._next
 
@@ -182,9 +201,10 @@ class FakeRanker:
         self.calls = 0
         self.last_signals = None
 
-    async def __call__(self, signals, candidates):
+    async def __call__(self, signals, candidates, explore_limit=0):
         self.calls += 1
         self.last_signals = signals
+        self.last_explore_limit = explore_limit
         if self.error:
             raise self.error
         picks = [
@@ -395,7 +415,7 @@ async def test_an_overlapping_run_cannot_make_a_post_go_out_twice():
     sender = FakeSender()
     inner = FakeRanker([5, 5, 5, 5, 5])
 
-    async def ranker(signals, candidates):
+    async def ranker(signals, candidates, explore_limit=0):
         result = await inner(signals, candidates)
         # A second run stores the first candidate while this one is still ranking.
         repo.recs.append(
@@ -406,6 +426,7 @@ async def test_an_overlapping_run_cannot_make_a_post_go_out_twice():
                 recommended_on=TODAY,
                 sent_at=NOW,
                 rank=1,
+                kind="exploit",
             )
         )
         return result
@@ -585,6 +606,7 @@ def unsent(repo, days_ago: int):
         recommended_on=TODAY - timedelta(days=days_ago),
         sent_at=None,
         rank=1,
+        kind="exploit",
     )
     repo.recs.append(rec)
     return rec
@@ -667,3 +689,187 @@ async def test_a_failing_usage_logger_does_not_break_the_run():
     stats = await uc.run(USER, now=NOW)
 
     assert stats["status"] == "sent" and sender.picks
+
+
+# ------------------------------------------------------------------ exploring
+
+
+class ExploreRanker(FakeRanker):
+    """FakeRanker that also offers explore posts: the candidates after the exploit ones."""
+
+    def __init__(self, fits, offers, **kw):
+        super().__init__(fits, **kw)
+        self.offers = offers  # [(topic, quality)] for the candidates after the fits
+
+    async def __call__(self, signals, candidates, explore_limit=0):
+        result = await super().__call__(signals, candidates, explore_limit)
+        rest = candidates[len(self.fits) :]
+        if explore_limit:
+            result.explore = [
+                ExplorePick(c.hn_id, topic, quality, f"outside {c.hn_id}")
+                for c, (topic, quality) in zip(rest, self.offers, strict=False)
+            ][:explore_limit]
+        result.picks = [replace(p, topic="databases") for p in result.picks]
+        return result
+
+
+@pytest.fixture
+def explore_on():
+    with (
+        patch.object(settings, "recommendation_explore_enabled", True),
+        patch.object(settings, "recommendation_explore_ratio", 0.5),
+        patch.object(settings, "recommendation_explore_max_per_day", 3),
+        patch.object(settings, "recommendation_explore_min_quality", 4),
+        patch.object(settings, "recommendation_explore_cooldown_days", 30),
+        patch.object(settings, "recommendation_topic_half_life_days", 30),
+    ):
+        yield
+
+
+def explore_case(
+    fits=(5, 5), offers=(("film", 5), ("art", 5), ("music", 5)), repo=None
+):
+    ranker = ExploreRanker(list(fits), list(offers))
+    uc, repo, sender, _ = make(repo=repo or FakeRepo(n_candidates=5), ranker=ranker)
+    return uc, repo, sender, ranker
+
+
+@pytest.mark.asyncio
+async def test_exploring_is_off_by_default_and_asks_the_model_for_nothing_extra():
+    uc, repo, sender, ranker = explore_case()
+    await uc.run(USER, now=NOW)
+
+    assert ranker.last_explore_limit == 0
+    assert sender.explored == [] and {r.kind for r in repo.recs} == {"exploit"}
+
+
+@pytest.mark.asyncio
+async def test_explore_picks_are_sent_labelled_after_the_exploit_picks(explore_on):
+    uc, repo, sender, ranker = explore_case()
+    stats = await uc.run(USER, now=NOW)
+
+    assert ranker.last_explore_limit > 0
+    # ratio 0.5 and two exploit picks: two explore picks (one per topic, best draws)
+    assert stats["sent"] == 4
+    assert [p[2] for p in sender.picks][:2] == [100, 101]
+    assert set(sender.explored) <= {102, 103, 104} and len(sender.explored) == 2
+    explore_rows = [r for r in repo.recs if r.kind == "explore"]
+    assert len(explore_rows) == 2
+    assert all(r.fit_score == 2 and r.quality == 5 and r.topic for r in explore_rows)
+    exploit_rows = [r for r in repo.recs if r.kind == "exploit"]
+    assert {r.topic for r in exploit_rows} == {"databases"}
+    assert max(r.rank for r in exploit_rows) < min(r.rank for r in explore_rows)
+
+
+@pytest.mark.asyncio
+async def test_low_quality_offers_are_not_explored(explore_on):
+    uc, repo, sender, _ = explore_case(offers=(("film", 3), ("art", 2), ("music", 3)))
+    stats = await uc.run(USER, now=NOW)
+
+    assert stats["sent"] == 2 and sender.explored == []
+
+
+@pytest.mark.asyncio
+async def test_a_post_that_is_an_exploit_pick_is_never_also_explored(explore_on):
+    class Overlap(ExploreRanker):
+        async def __call__(self, signals, candidates, explore_limit=0):
+            result = await super().__call__(signals, candidates, explore_limit)
+            first = candidates[0]
+            result.explore.append(ExplorePick(first.hn_id, "film", 5, "dup"))
+            return result
+
+    ranker = Overlap([5, 5], [("art", 5)])
+    uc, repo, sender, _ = make(ranker=ranker)
+    await uc.run(USER, now=NOW)
+
+    assert 100 not in sender.explored
+    assert len({r.post_id for r in repo.recs}) == len(repo.recs)
+
+
+@pytest.mark.asyncio
+async def test_explore_ceiling_per_day_stops_asking_the_model(explore_on):
+    uc, repo, sender, ranker = explore_case()
+    with patch.object(settings, "recommendation_explore_max_per_day", 1):
+        stats = await uc.run(USER, now=NOW)
+        assert (
+            stats["sent"] == 3 and len(sender.explored) == 1
+        )  # ceiling of 1 explore pick
+
+        repo.add_candidates(300, 301, 302)
+        await uc.run(USER, now=NOW + timedelta(hours=4))
+
+    assert ranker.last_explore_limit == 0  # today's ceiling is used up
+    assert len(sender.explored) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_topic_rejected_while_exploring_is_left_alone_for_the_cooldown(
+    explore_on,
+):
+    repo = FakeRepo(n_candidates=5)
+    liked_not = uuid4()
+    repo.history.append(
+        SentPick(liked_not, "film", "explore", TODAY - timedelta(days=3))
+    )
+    repo.activity.append((liked_not, "not_for_me", NOW - timedelta(days=2)))
+    uc, repo, sender, _ = explore_case(
+        offers=(("film", 5), ("art", 5), ("music", 5)), repo=repo
+    )
+    await uc.run(USER, now=NOW)
+
+    film_hn_id = 102  # first offer, topic film
+    assert film_hn_id not in sender.explored
+    assert len(sender.explored) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_daily_cap_covers_exploit_and_explore_together(explore_on):
+    with patch.object(settings, "recommendation_daily_max", 3):
+        uc, repo, sender, _ = explore_case()
+        stats = await uc.run(USER, now=NOW)
+
+    assert stats["sent"] == 3 and len(repo.recs) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_reports_explore_picks_and_stores_nothing(explore_on):
+    uc, repo, sender, _ = explore_case()
+    stats = await uc.run(USER, now=NOW, dry_run=True)
+
+    assert stats["status"] == "dry_run"
+    assert len(stats["explore"]) == 2 and len(stats["explore_offered"]) == 3
+    assert stats["explore"][0]["quality"] == 5 and stats["explore"][0]["topic"]
+    assert repo.recs == [] and sender.picks == []
+
+
+@pytest.mark.asyncio
+async def test_the_model_sees_the_topic_record(explore_on):
+    repo = FakeRepo(n_candidates=5)
+    pid = uuid4()
+    repo.history.append(SentPick(pid, "rust", "exploit", TODAY - timedelta(days=4)))
+    repo.activity.append((pid, "save", NOW - timedelta(days=3)))
+    uc, repo, _, ranker = explore_case(repo=repo)
+    await uc.run(USER, now=NOW)
+
+    assert [(t.topic, t.shown, t.saved) for t in ranker.last_signals.topics] == [
+        ("rust", 1, 1)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_metrics_compare_exploit_and_explore_outcomes(explore_on):
+    repo = FakeRepo(n_candidates=5)
+    a, b = uuid4(), uuid4()
+    repo.history += [
+        SentPick(a, "rust", "exploit", TODAY - timedelta(days=4)),
+        SentPick(b, "film", "explore", TODAY - timedelta(days=4)),
+    ]
+    repo.activity += [
+        (a, "save", NOW - timedelta(days=3)),
+        (b, "not_for_me", NOW - timedelta(days=3)),
+    ]
+    uc, _, _, _ = explore_case(repo=repo)
+    stats = await uc.run(USER, now=NOW, dry_run=True)
+
+    assert stats["metrics"]["exploit"]["saved"] == 1
+    assert stats["metrics"]["explore"]["rejected"] == 1

@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     telegram_group_summary_style: str = "basic"
     telegram_dm_delivery_enabled: bool = True  # False = only the group feed gets summaries and pushes
 
+    # Bot access control. Empty allowlist = open to every Telegram user (a warning is logged at startup).
+    telegram_allowed_user_ids: str = ""  # comma-separated Telegram user ids allowed to DM the bot
+    telegram_user_rate_limit_per_minute: int = 30  # updates per user per minute; 0 disables
+
     # Recommendations: picks learned from the group's saves, sent to their own forum topic
     recommendation_enabled: bool = False  # adds the recommend step to the hourly pipeline in run_scheduler.py
     telegram_recommendation_topic_id: Optional[int] = None  # forum topic for the picks
@@ -86,6 +90,13 @@ class Settings(BaseSettings):
     recommendation_min_saves: int = 5  # fewer saves than this: skip, there is no taste to learn
     recommendation_lookback_hours: int = 36  # candidate window, wider than a day to survive a missed run
     recommendation_ignored_days: int = 14  # how far back unreacted picks count as a weak negative
+    # Exploration: mix picks outside the reader's profile into the hourly run (docs/recommendation-exploration.md)
+    recommendation_explore_enabled: bool = False
+    recommendation_explore_ratio: float = 0.2  # share of all picks that explore; raised automatically while the record is thin
+    recommendation_explore_max_per_day: int = 3  # hard ceiling on explore picks per local day
+    recommendation_explore_min_quality: int = 4  # lowest 1-5 quality rating that may be explored
+    recommendation_explore_cooldown_days: int = 30  # days a rejected explore topic is left alone
+    recommendation_topic_half_life_days: int = 30  # days for a topic outcome's weight to halve
 
     # Telegram message formatting
     telegram_full_summary_max_length: int = 4000  # Show More cap; under Telegram's 4096 to leave room for title/links
