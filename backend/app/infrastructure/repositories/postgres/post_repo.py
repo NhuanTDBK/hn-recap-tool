@@ -1,6 +1,6 @@
 """PostgreSQL implementation of Post repository."""
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Set
 from uuid import uuid4
 
@@ -155,6 +155,52 @@ class PostgresPostRepository(PostRepository):
             .where(PostModel.collected_at >= start_date)
             .where(PostModel.collected_at <= end_date)
             .order_by(PostModel.score.desc())
+        )
+
+        result = await self.session.execute(stmt)
+        post_models = result.scalars().all()
+
+        return [self._to_domain(model) for model in post_models]
+
+    async def search_posts(
+        self,
+        keywords: List[str],
+        limit: int = 10,
+        offset: int = 0,
+        max_age_days: int = 30,
+    ) -> List[DomainPost]:
+        """Search posts by title keywords within a time window.
+
+        Args:
+            keywords: Search terms (OR logic, case-insensitive via ILIKE).
+            limit: Maximum posts to return.
+            offset: Pagination offset.
+            max_age_days: Only return posts collected within this many days.
+
+        Returns:
+            List of matching Post entities, ordered by score descending.
+        """
+        since = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+
+        conditions = [
+            PostModel.type == "story",
+            PostModel.is_dead == False,  # noqa: E712
+            PostModel.is_deleted == False,  # noqa: E712
+            PostModel.collected_at >= since,
+        ]
+
+        if keywords:
+            keyword_conditions = [
+                PostModel.title.ilike(f"%{kw}%") for kw in keywords
+            ]
+            conditions.append(or_(*keyword_conditions))
+
+        stmt = (
+            select(PostModel)
+            .where(*conditions)
+            .order_by(PostModel.score.desc())
+            .offset(offset)
+            .limit(limit)
         )
 
         result = await self.session.execute(stmt)

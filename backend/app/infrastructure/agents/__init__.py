@@ -26,6 +26,10 @@ _configure_provider()
 
 from .token_tracker import TokenTracker, PRICING
 from .base_agent import BaseAgent, TrackedAgent
+from .discussion_agent import (
+    create_discussion_agent,
+    discuss,
+)
 from .summarization_agent import (
     SummaryOutput,
     create_summarization_agent,
@@ -42,4 +46,6 @@ __all__ = [
     "SummaryOutput",
     "create_summarization_agent",
     "summarize_post",
+    "create_discussion_agent",
+    "discuss",
 ]

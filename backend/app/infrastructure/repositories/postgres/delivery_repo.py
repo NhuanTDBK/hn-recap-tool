@@ -217,7 +217,7 @@ class PostgresConversationRepository(ConversationRepository):
     async def save_conversation(
         self,
         user_id: int,
-        post_id: str,
+        post_id: Optional[str],
         messages: list,
         token_usage: dict,
     ) -> dict:
@@ -225,7 +225,7 @@ class PostgresConversationRepository(ConversationRepository):
 
         Args:
             user_id: User in conversation
-            post_id: Post being discussed
+            post_id: Post being discussed (optional, None for topic discussions)
             messages: Message list
             token_usage: Token usage dict
 
@@ -252,7 +252,7 @@ class PostgresConversationRepository(ConversationRepository):
         return {
             "id": str(conversation.id),
             "user_id": conversation.user_id,
-            "post_id": str(conversation.post_id),
+            "post_id": str(conversation.post_id) if conversation.post_id else None,
             "messages": conversation.messages,
             "token_usage": conversation.token_usage,
             "started_at": conversation.started_at.isoformat(),
@@ -273,10 +273,10 @@ class PostgresConversationRepository(ConversationRepository):
                 Conversation.user_id == user_id,
                 Conversation.ended_at.is_(None),  # Active conversations have no end time
             )
-        )
+        ).order_by(Conversation.started_at.desc()).limit(1)  # newest wins if a race left two
 
         result = await self.session.execute(stmt)
-        conversation = result.scalar_one_or_none()
+        conversation = result.scalars().first()
 
         if not conversation:
             return None
@@ -284,7 +284,7 @@ class PostgresConversationRepository(ConversationRepository):
         return {
             "id": str(conversation.id),
             "user_id": conversation.user_id,
-            "post_id": str(conversation.post_id),
+            "post_id": str(conversation.post_id) if conversation.post_id else None,
             "messages": conversation.messages,
             "token_usage": conversation.token_usage,
             "started_at": conversation.started_at.isoformat(),
@@ -329,7 +329,7 @@ class PostgresConversationRepository(ConversationRepository):
         return {
             "id": str(conversation.id),
             "user_id": conversation.user_id,
-            "post_id": str(conversation.post_id),
+            "post_id": str(conversation.post_id) if conversation.post_id else None,
             "messages": conversation.messages,
             "token_usage": conversation.token_usage,
             "started_at": conversation.started_at.isoformat(),
@@ -374,7 +374,7 @@ class PostgresConversationRepository(ConversationRepository):
         return {
             "id": str(conversation.id),
             "user_id": conversation.user_id,
-            "post_id": str(conversation.post_id),
+            "post_id": str(conversation.post_id) if conversation.post_id else None,
             "messages": conversation.messages,
             "token_usage": conversation.token_usage,
             "started_at": conversation.started_at.isoformat(),

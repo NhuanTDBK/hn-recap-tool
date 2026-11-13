@@ -141,6 +141,27 @@ class PostRepository(ABC):
         """
         pass
 
+    @abstractmethod
+    async def search_posts(
+        self,
+        keywords: List[str],
+        limit: int = 10,
+        offset: int = 0,
+        max_age_days: int = 30,
+    ) -> List[Post]:
+        """Search posts by title keywords within a time window.
+
+        Args:
+            keywords: Search terms (OR logic, case-insensitive via ILIKE).
+            limit: Maximum posts to return.
+            offset: Pagination offset.
+            max_age_days: Only return posts collected within this many days.
+
+        Returns:
+            List of matching Post entities.
+        """
+        pass
+
 
 class DigestRepository(ABC):
     """Interface for digest data persistence."""
@@ -324,7 +345,7 @@ class ConversationRepository(ABC):
     async def save_conversation(
         self,
         user_id: int,
-        post_id: str,
+        post_id: Optional[str],
         messages: list,
         token_usage: dict,
     ) -> dict:

@@ -1,146 +1,190 @@
 """Discussion message handler for DISCUSSION state.
 
-Routes user messages during active discussions to the discussion agent.
-Loads post content from RocksDB and tracks conversation history.
+Routes user messages during active discussions to the DiscussionAgent.
+Conversations auto-expire after 30 minutes of inactivity.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from aiogram import Router
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infrastructure.database.models import Post
+from app.application.use_cases.discussion import DiscussionUseCase
+from app.infrastructure.database.models import User
+from app.infrastructure.storage.rocksdb_store import RocksDBContentStore
 from app.presentation.bot.states import BotStates
 
 logger = logging.getLogger(__name__)
 
+SESSION_TIMEOUT_MINUTES = 30
+
 router = Router()
 
 
-@router.message(Command("cancel"), StateFilter(BotStates.DISCUSSION))
-async def cmd_cancel_discussion(message: Message, state: FSMContext):
-    """Handle /cancel command during discussion.
-
-    Exits DISCUSSION state and returns to IDLE.
+@router.message(StateFilter(BotStates.IDLE))
+async def handle_idle_message(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+):
+    """Catch-all handler: any non-command message in IDLE state enters DISCUSSION.
 
     Args:
-        message: Incoming message
-        state: FSM state context
+        message: Incoming message.
+        state: FSM state context.
+        session: Database session.
     """
     telegram_id = message.from_user.id
-    data = await state.get_data()
-    post_id = data.get("active_post_id")
+    user_message = message.text
 
-    logger.info(f"User {telegram_id} cancelled discussion for post {post_id}")
+    if not user_message:
+        return
 
-    # Return to IDLE state
-    await state.set_state(BotStates.IDLE)
-    await state.clear()
+    stmt = select(User).where(User.telegram_id == telegram_id)
+    result = await session.execute(stmt)
+    user = result.scalar_one_or_none()
 
-    await message.answer(
-        "✅ <b>Discussion ended.</b>\n\n"
-        "Feel free to start a new discussion by tapping 💬 <b>Discuss</b> on any post."
+    if not user:
+        await message.answer("Welcome! Please use /start to set up your account first.")
+        return
+
+    await state.set_state(BotStates.DISCUSSION)
+    await state.update_data(
+        discussion_started_at=datetime.now(timezone.utc).isoformat(),
+        last_message_at=datetime.now(timezone.utc).isoformat(),
     )
+
+    logger.info(
+        f"User {user.id} entered DISCUSSION via natural message: {user_message[:80]}..."
+    )
+
+    await _process_question(message, state, session, user, user_message)
 
 
 @router.message(StateFilter(BotStates.DISCUSSION))
 async def handle_discussion_message(
     message: Message,
     state: FSMContext,
-    session: AsyncSession
+    session: AsyncSession,
 ):
     """Handle user messages during DISCUSSION state.
 
-    Routes messages to discussion agent (placeholder for now).
+    Checks for session timeout first. If more than 30 minutes have passed
+    since the last message, the conversation ends and a fresh one starts.
 
     Args:
-        message: Incoming message
-        state: FSM state context
-        session: Database session
+        message: Incoming message.
+        state: FSM state context.
+        session: Database session.
     """
     telegram_id = message.from_user.id
     user_message = message.text
 
-    # Get discussion state data
-    data = await state.get_data()
-    post_id = data.get("active_post_id")
+    if not user_message:
+        await message.answer("Please send a text message.")
+        return
 
-    if not post_id:
-        logger.error(f"User {telegram_id} in DISCUSSION state but no active_post_id")
+    stmt = select(User).where(User.telegram_id == telegram_id)
+    result = await session.execute(stmt)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        logger.warning(f"Unknown user {telegram_id} in DISCUSSION state")
         await message.answer(
-            "❌ Discussion state error. Please start a new discussion."
+            "I don't recognize you. Please use /start to set up your account."
         )
         await state.set_state(BotStates.IDLE)
         await state.clear()
         return
 
-    logger.info(
-        f"Discussion message from user {telegram_id} for post {post_id}: "
-        f"{user_message[:50]}..."
-    )
+    data = await state.get_data()
+    last_msg_at = data.get("last_message_at")
+
+    if last_msg_at:
+        try:
+            last_time = datetime.fromisoformat(last_msg_at)
+            if datetime.now(timezone.utc) - last_time > timedelta(
+                minutes=SESSION_TIMEOUT_MINUTES
+            ):
+                content_store = RocksDBContentStore(read_only=True)
+                use_case = DiscussionUseCase(session, content_store)
+                await use_case.end_conversation(user_id=user.id)
+                await state.update_data(
+                    discussion_started_at=datetime.now(timezone.utc).isoformat(),
+                    last_message_at=datetime.now(timezone.utc).isoformat(),
+                    active_post_id=data.get("active_post_id"),
+                )
+                logger.info(
+                    f"Session timed out for user {user.id}, starting fresh conversation"
+                )
+        except (ValueError, TypeError):
+            pass
+
+    await _process_question(message, state, session, user, user_message)
+
+
+async def _process_question(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    user: User,
+    user_message: str,
+):
+    """Process a user question through the discussion agent.
+
+    Args:
+        message: Telegram message object.
+        state: FSM state context.
+        session: Database session.
+        user: User model instance.
+        user_message: The user's question text.
+    """
+    data = await state.get_data()
+    post_id_str = data.get("active_post_id")
+
+    post_id = None
+    if post_id_str:
+        try:
+            post_id = UUID(post_id_str)
+        except (ValueError, TypeError):
+            pass
 
     try:
-        # Load post from database
-        stmt = select(Post).where(Post.id == UUID(post_id))
-        result = await session.execute(stmt)
-        post = result.scalar_one_or_none()
+        content_store = RocksDBContentStore(read_only=True)
+        use_case = DiscussionUseCase(session, content_store)
 
-        if not post:
-            await message.answer("❌ Post not found. Ending discussion.")
-            await state.set_state(BotStates.IDLE)
-            await state.clear()
-            return
+        processing_msg = await message.answer("Thinking\u2026")
 
-        # TODO: Load post content from RocksDB
-        # from app.infrastructure.storage.rocksdb_store import RocksDBStore
-        # content = rocksdb_store.get(str(post.id), "markdown")
-
-        # TODO: Call discussion agent with post content
-        # For now, send placeholder response
-        await message.answer(
-            f"💬 <i>Discussion agent coming soon!</i>\n\n"
-            f"You asked: \"{user_message}\"\n\n"
-            f"For now, I can only acknowledge your message. "
-            f"Full discussion features will be available in Phase 5.\n\n"
-            f"You can:\n"
-            f"• Continue asking questions (I'll track them)\n"
-            f"• Type /cancel to exit discussion mode\n"
-            f"• Tap 🔗 <b>Read</b> to open the article"
+        response = await use_case.ask(
+            user=user,
+            question=user_message,
+            post_id=post_id,
         )
 
-        # Update last_message_at timestamp
-        await state.update_data(
-            last_message_at=datetime.now(timezone.utc).isoformat()
-        )
+        await processing_msg.delete()
 
-        # TODO: Track conversation in conversations table
-        # conversation_repo = PostgresConversationRepository(session)
-        # await conversation_repo.save_conversation_message(
-        #     user_id=user.id,
-        #     post_id=post_id,
-        #     role="user",
-        #     content=user_message
-        # )
+        max_len = 4000
+        if len(response) <= max_len:
+            await message.answer(response)
+        else:
+            for i in range(0, len(response), max_len):
+                await message.answer(response[i : i + max_len])
 
-        logger.info(
-            f"Handled discussion message for user {telegram_id}, post {post_id}"
-        )
+        await state.update_data(last_message_at=datetime.now(timezone.utc).isoformat())
+
+        logger.info(f"Discussion response sent to user {user.id}")
 
     except Exception as e:
-        logger.error(
-            f"Error handling discussion message: {e}",
-            exc_info=True
-        )
+        logger.error(f"Error in discussion processing: {e}", exc_info=True)
         await message.answer(
-            "❌ Sorry, I encountered an error. Please try again or type /cancel."
+            "Sorry, I encountered an error processing your question. Please try again."
         )
 
 
-# Export router
 __all__ = ["router"]
