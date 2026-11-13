@@ -142,11 +142,15 @@ class HourlyDeliveryJob:
 
             # Load summaries into posts
             for post in posts:
-                summary_stmt = select(Summary).where(
-                    and_(Summary.user_id == user_id, Summary.post_id == post.id)
+                # The unique constraint on summaries was dropped, so tolerate duplicates: newest wins.
+                summary_stmt = (
+                    select(Summary)
+                    .where(and_(Summary.user_id == user_id, Summary.post_id == post.id))
+                    .order_by(Summary.created_at.desc())
+                    .limit(1)
                 )
                 summary_result = await self.db_session.execute(summary_stmt)
-                summary = summary_result.scalar_one_or_none()
+                summary = summary_result.scalars().first()
                 if summary:
                     post.summary = summary.summary_text
 

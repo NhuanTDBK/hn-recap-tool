@@ -1,5 +1,8 @@
 """Token usage tracking for per-user cost monitoring and billing."""
 
+import json
+import logging
+import os
 from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Dict, Optional
@@ -7,12 +10,34 @@ from typing import TYPE_CHECKING, Dict, Optional
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-# Pricing per 1M tokens (as of 2025)
+logger = logging.getLogger(__name__)
+
+# Pricing in USD per 1M tokens. Add models you run, or set MODEL_PRICING_JSON, e.g.
+#   MODEL_PRICING_JSON='{"my-model": {"input": 0.30, "output": 1.20}}'
+# A model that is not listed is costed at 0.0 and a warning is logged once, so a missing price is visible.
 PRICING = {
     "gpt-4o-mini": {"input": 0.150, "output": 0.600},
     "gpt-4o": {"input": 5.00, "output": 15.00},
     "gpt-4o-realtime-preview": {"input": 5.00, "output": 20.00},
+    # Introductory rates, through 2026-12-31 (previously hard-coded in personalized_summarization.py).
+    "gemini-3.6-flash": {"input": 0.75, "output": 3.75},
 }
+
+
+def _load_pricing_overrides() -> None:
+    raw = os.getenv("MODEL_PRICING_JSON", "").strip()
+    if not raw:
+        return
+    try:
+        overrides = json.loads(raw)
+        for model, rates in overrides.items():
+            PRICING[model] = {"input": float(rates["input"]), "output": float(rates["output"])}
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        logger.warning("Ignoring invalid MODEL_PRICING_JSON: %s", exc)
+
+
+_load_pricing_overrides()
+_warned_models: set[str] = set()
 
 
 class TokenTracker:
@@ -40,6 +65,11 @@ class TokenTracker:
             Cost in USD (float)
         """
         if model not in PRICING:
+            if model not in _warned_models:
+                _warned_models.add(model)
+                logger.warning(
+                    "No pricing for model %r: cost is recorded as 0. Add it to PRICING or MODEL_PRICING_JSON.", model
+                )
             return 0.0
 
         input_cost = (input_tokens / 1_000_000) * PRICING[model]["input"]
@@ -138,6 +168,43 @@ class TokenTracker:
         )
         self.db.add(call)
         await self.db.commit()
+
+    async def track_shared_call(
+        self,
+        agent_name: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        operation: Optional[str] = None,
+        latency_ms: Optional[int] = None,
+    ) -> Decimal:
+        """Record one LLM call that serves many users (one summary copied to a whole group).
+
+        Writes a single ``agent_calls`` row with no user, so the cost is counted once instead of once
+        per recipient. The row is added to the session but not committed: the caller commits it
+        together with the work it paid for.
+
+        Returns:
+            The cost of the call in USD.
+        """
+        from app.infrastructure.database.models import AgentCall
+
+        cost_usd = Decimal(str(self.calculate_cost(model, input_tokens, output_tokens)))
+        self.db.add(
+            AgentCall(
+                user_id=None,
+                agent_name=agent_name,
+                operation=operation,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                cost_usd=cost_usd,
+                latency_ms=latency_ms,
+                status="success",
+            )
+        )
+        return cost_usd
 
     async def get_user_usage(
         self,

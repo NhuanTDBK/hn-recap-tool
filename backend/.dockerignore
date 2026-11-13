@@ -1,0 +1,28 @@
+# Secrets - pass at run time (compose env_file / environment), never bake into layers
+.env
+.env.*
+!.env.example
+
+# Local data and state
+data/
+*.rocksdb/
+
+# Python / tooling noise
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.coverage
+.coverage.*
+htmlcov/
+
+# Tests are not needed in the runtime image
+tests/
+
+# OS / editor
+.DS_Store
+.git/
+.vscode/
+.idea/

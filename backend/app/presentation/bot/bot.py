@@ -178,10 +178,21 @@ class BotManager:
                     data["session"] = session
                     return await handler(event, data)
 
+        # Access control runs first (outer): rejected updates never touch FSM storage or the database.
+        from app.presentation.bot.middleware import AccessControlMiddleware, parse_id_list
+
+        self._dp.update.outer_middleware(
+            AccessControlMiddleware(
+                allowed_user_ids=parse_id_list(settings.telegram_allowed_user_ids),
+                group_chat_id=settings.telegram_group_chat_id,
+                max_per_minute=settings.telegram_user_rate_limit_per_minute,
+            )
+        )
+
         # Register middleware
         self._dp.update.middleware(DatabaseMiddleware())
 
-        logger.info("Middleware registered: database session injection")
+        logger.info("Middleware registered: access control, database session injection")
 
     def setup_dispatcher(self):
         """Setup dispatcher with handlers (legacy method).

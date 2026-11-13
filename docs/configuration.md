@@ -37,6 +37,7 @@ All configuration is managed through environment variables in `backend/.env`.
 | `OPENAI_MODEL` | No | `gpt-4o-mini` | Model to use (gpt-4o-mini, gpt-4o, gpt-4-turbo) |
 | `OPENAI_DEFAULT_TEMPERATURE` | No | `0.7` | Response temperature (0-2, higher = more creative) |
 | `OPENAI_DEFAULT_MAX_TOKENS` | No | `1000` | Maximum tokens per response |
+| `MODEL_PRICING_JSON` | No | - | Prices in USD per 1M tokens for cost tracking, for example `{"my-model": {"input": 0.30, "output": 1.20}}`. A model with no price is recorded at cost 0 and a warning is logged once |
 
 ### Telegram
 
@@ -44,6 +45,8 @@ All configuration is managed through environment variables in `backend/.env`.
 |----------|----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | - | Bot token from @BotFather |
 | `TELEGRAM_CHANNEL_ID` | Yes | - | Target channel or user ID for delivery |
+| `TELEGRAM_ALLOWED_USER_IDS` | No | empty | Comma-separated Telegram user ids allowed to message the bot. **Empty means anyone can register**, and a warning is logged at startup. Updates in `TELEGRAM_GROUP_CHAT_ID` are always accepted; other group chats are ignored |
+| `TELEGRAM_USER_RATE_LIMIT_PER_MINUTE` | No | `30` | Updates (messages and button presses) one user may send per minute. Extra updates are dropped. `0` turns the limit off |
 
 ### Recommendations
 
@@ -61,6 +64,12 @@ Optional. The job is off until `RECOMMENDATION_ENABLED=true`. How it works: [rec
 | `RECOMMENDATION_MIN_SAVES` | No | `5` | Fewer saves than this: skip |
 | `RECOMMENDATION_LOOKBACK_HOURS` | No | `36` | Longest candidate window |
 | `RECOMMENDATION_IGNORED_DAYS` | No | `14` | How far back untouched picks count as a weak no |
+| `RECOMMENDATION_EXPLORE_ENABLED` | No | `false` | Mixes in picks outside the reader's profile. See [recommendation-exploration.md](recommendation-exploration.md) |
+| `RECOMMENDATION_EXPLORE_RATIO` | No | `0.2` | Share of all picks that explore. Raised to 0.4 while fewer than 20 picks have been sent |
+| `RECOMMENDATION_EXPLORE_MAX_PER_DAY` | No | `3` | Hard ceiling on explore picks per local day. `0` turns exploring off |
+| `RECOMMENDATION_EXPLORE_MIN_QUALITY` | No | `4` | Lowest quality rating (1-5) that may be explored |
+| `RECOMMENDATION_EXPLORE_COOLDOWN_DAYS` | No | `30` | Days a topic is left alone after the reader rejects an explore pick on it |
+| `RECOMMENDATION_TOPIC_HALF_LIFE_DAYS` | No | `30` | Days for a topic outcome's weight to halve |
 
 ### Hacker News API
 

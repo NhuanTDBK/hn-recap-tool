@@ -20,6 +20,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.agents.base_agent import BaseAgent
+from app.infrastructure.agents.token_tracker import TokenTracker
 from app.infrastructure.database.models import Post, Summary, User
 from app.infrastructure.services.group_subscriber import is_feed_enabled
 from app.infrastructure.storage.rocksdb_store import RocksDBContentStore
@@ -630,13 +631,24 @@ async def summarize_for_users_in_group(
             output_tokens = sum(r.usage.output_tokens for r in run_result.raw_responses)
             actual_tokens = input_tokens + output_tokens
 
-            # Calculate cost (gemini-3.6-flash introductory rates, through 2026-12-31)
-            input_cost = input_tokens * 0.75 / 1_000_000
-            output_cost = output_tokens * 3.75 / 1_000_000
-            cost_per_summary = Decimal(str(input_cost + output_cost))
+            # One LLM call is shared by the whole group: record it once in agent_calls, priced for
+            # the model that actually ran (not a hard-coded rate card).
+            call_cost = await TokenTracker(session).track_shared_call(
+                agent_name=base_agent.name,
+                model=base_agent.model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                operation="summarize_post",
+            )
+
+            # Split the call's tokens and cost across the copies so per-summary rows add up to the
+            # real total instead of repeating it once per recipient.
+            n_recipients = len(users_needing_summary)
+            cost_per_summary = call_cost / n_recipients
+            base_tokens, extra_tokens = divmod(actual_tokens, n_recipients)
 
             # Distribute summary to users in group who need it
-            for user_id in users_needing_summary:
+            for index, user_id in enumerate(users_needing_summary):
                 summary = Summary(
                     post_id=post_id,
                     user_id=user_id,  # Personalized to this user
@@ -644,7 +656,7 @@ async def summarize_for_users_in_group(
                     summary_text=summary_text,
                     key_points=[],
                     technical_level="intermediate",
-                    token_count=actual_tokens,
+                    token_count=base_tokens + (extra_tokens if index == 0 else 0),
                     cost_usd=cost_per_summary,
                 )
 
@@ -655,7 +667,7 @@ async def summarize_for_users_in_group(
             await session.commit()
 
             stats["total_tokens"] += actual_tokens
-            stats["total_cost"] += cost_per_summary
+            stats["total_cost"] += call_cost
 
             logger.debug(
                 f"✓ Post {post_id}: summarized and distributed to {len(users_needing_summary)} users"
