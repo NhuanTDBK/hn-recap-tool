@@ -166,3 +166,21 @@ async def test_shared_call_is_recorded_once_without_a_user():
     session.add.assert_called_once()
     row = session.add.call_args.args[0]
     assert row.user_id is None and row.total_tokens == 1_000_000 and row.cost_usd == Decimal("0.75")
+
+
+# --------------------------------------------------------------------------- migrations
+def test_alembic_has_one_head_and_revision_ids_fit_the_version_column():
+    """alembic_version.version_num is varchar(32): a longer id fails on Postgres and rolls back the upgrade."""
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    backend = Path(__file__).resolve().parents[2]
+    config = Config(str(backend / "alembic.ini"))
+    config.set_main_option("script_location", str(backend / "alembic"))
+    script = ScriptDirectory.from_config(config)
+
+    assert len(script.get_heads()) == 1, f"multiple Alembic heads: {script.get_heads()}"
+    too_long = [r.revision for r in script.walk_revisions() if len(r.revision) > 32]
+    assert not too_long, f"revision ids longer than 32 chars: {too_long}"

@@ -1,6 +1,6 @@
 """Make conversations.post_id nullable for topic-based discussions
 
-Revision ID: 001
+Revision ID: 20261111001
 Revises: 20261110001
 Create Date: 2026-05-08
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 
-revision: str = "001_make_conversations_post_id_nullable"
+revision: str = "20261111001"
 down_revision: Union[str, None] = "20261110001"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

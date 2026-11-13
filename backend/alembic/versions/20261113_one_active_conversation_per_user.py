@@ -6,7 +6,7 @@ all but the newest active conversation per user, then enforces the rule with a
 partial unique index.
 
 Revision ID: 20261113001
-Revises: 001_make_conversations_post_id_nullable
+Revises: 20261111001
 Create Date: 2026-11-13
 
 """
@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "20261113001"
-down_revision: str | None = "001_make_conversations_post_id_nullable"
+down_revision: str | None = "20261111001"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
